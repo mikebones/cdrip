@@ -1,0 +1,24 @@
+[project]
+name = "cdrip"
+version = "0.1.0"
+description = "Rip an audio CD to verified FLAC and hand it to smoked-salmon"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# libdiscid makes the disc ID agree byte-for-byte with MusicBrainz. Without it
+# cdrip falls back to its own implementation of the same algorithm.
+discid = ["python-libdiscid>=2.0"]
+
+[project.scripts]
+cdrip = "cdrip.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
