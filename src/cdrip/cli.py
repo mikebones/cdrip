@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 
+from . import compliance as compliance_mod
 from . import config as config_mod
 from . import drive as drive_mod
 from . import musicbrainz as mb
@@ -140,6 +141,23 @@ def cmd_submit_discid(args, cfg) -> int:
     return 0
 
 
+
+def _metadata_findings(discid_result: dict) -> list:
+    """Run the pre-rip naming check over the release MusicBrainz returned."""
+    releases = discid_result.get("releases") or []
+    if not releases:
+        return []
+    rel = releases[0]
+    titles = {}
+    for medium in rel.get("media") or []:
+        for track in medium.get("tracks") or []:
+            titles[int(track["position"])] = track.get("title", "")
+    artist = ", ".join(
+        a["artist"]["name"] for a in rel.get("artist-credit", []) if "artist" in a
+    )
+    return compliance_mod.check_metadata(titles, album=rel.get("title", ""), artist=artist)
+
+
 def cmd_rip(args, cfg) -> int:
     toc, disc_id, submit_url = _load_toc(args)
     _describe_toc(toc, disc_id, submit_url)
@@ -171,6 +189,21 @@ def cmd_rip(args, cfg) -> int:
     release = None
     if known:
         _echo("  disc ID known; whipper will tag from MusicBrainz directly.")
+        # Check the titles whipper is about to turn into filenames, BEFORE
+        # spending fifteen minutes ripping. Once the .cue and .log exist they
+        # reference those names, and editing a rip log is forbidden - so a bad
+        # character here means correcting MusicBrainz and ripping again.
+        findings = _metadata_findings(known)
+        if findings:
+            _echo("")
+            for f in findings:
+                _echo("  %s" % f)
+            _echo("")
+            if not args.ignore_naming:
+                _echo("  Fix these in MusicBrainz first, then re-run - renaming after")
+                _echo("  the rip would invalidate the .cue and .log. Use")
+                _echo("  --ignore-naming to rip anyway.")
+                return 2
     else:
         _echo("  disc ID unknown - whipper will rip untagged.")
         if args.release:
@@ -263,6 +296,16 @@ def _handoff(cfg, directory: str, log_path: str | None, args) -> int:
         if log_path:
             log_path = os.path.join(final, os.path.basename(log_path))
 
+    _section("Formatting rules")
+    rule_findings = compliance_mod.check_release(final)
+    for f in rule_findings:
+        _echo("  %s" % f)
+    _echo("  %s" % compliance_mod.summarise(rule_findings))
+    fixable = [f for f in rule_findings if f.fixable_in_place]
+    if any(f.rule == "2.2.10.10" for f in fixable):
+        _section("Recompressing to level 8")
+        _echo(salmon_mod.compress(target, final))
+
     _section("smoked-salmon checks")
     _echo(salmon_mod.run_checks(target, final, log_path))
 
@@ -303,6 +346,16 @@ def _handoff(cfg, directory: str, log_path: str | None, args) -> int:
     return 0
 
 
+def cmd_check(args, cfg) -> int:
+    """Check a finished release folder against the formatting rules."""
+    findings = compliance_mod.check_release(args.path)
+    for f in findings:
+        _echo("  %s" % f)
+    _echo("")
+    _echo(compliance_mod.summarise(findings))
+    return 1 if compliance_mod.blockers(findings) else 0
+
+
 def cmd_finish(args, cfg) -> int:
     """Run the salmon stages against an already-ripped folder."""
     result = rip_mod.collect(args.path)
@@ -337,6 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="rip once even when AccurateRip cannot verify it")
     p_rip.add_argument("--keep-second", action="store_true",
                        help="keep the second rip instead of deleting it")
+    p_rip.add_argument("--ignore-naming", action="store_true",
+                       help="rip even when the MusicBrainz titles contain "
+                            "lookalike characters")
     p_rip.add_argument("--force", action="store_true",
                        help="rip even if the drive cache cannot be defeated")
     p_rip.add_argument("--skip-salmon", action="store_true",
@@ -344,6 +400,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_rip.add_argument("--no-torrent", action="store_true",
                        help="run salmon's checks and spectrals but make no torrent")
     p_rip.set_defaults(func=cmd_rip)
+
+    p_chk = sub.add_parser("check", help="check a finished release against the formatting rules")
+    p_chk.add_argument("path")
+    p_chk.set_defaults(func=cmd_check)
 
     p_fin = sub.add_parser("finish", help="run the salmon stages on an existing rip")
     p_fin.add_argument("path")

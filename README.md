@@ -59,6 +59,7 @@ pip install -e .
 cdrip info                    # TOC, disc ID, drive offset, MusicBrainz status
 cdrip submit-discid --artist "..." --album "..."
 cdrip rip --name "Artist - Album (2007) [CD FLAC]"
+cdrip check /path/to/release          # formatting rules only
 cdrip finish /path/to/existing/rip    # just the salmon stages
 ```
 
@@ -125,6 +126,48 @@ majority of measurable tracks agree.
 The measurement itself lives in smoked-salmon as `salmon check lossy`
 (`--json` for machine callers); `cdrip` invokes it rather than keeping a second
 copy, so anything else driving salmon reaches the same verdict.
+
+## Formatting rules, and when they can be fixed
+
+`cdrip` checks the tracker formatting rules that are mechanically checkable.
+The rule numbers are RED's, but the substance is ordinary hygiene most Gazelle
+trackers share. What matters more than the list is *when* each one can be
+fixed:
+
+**Before the rip.** Anything that ends up in a filename. whipper builds
+filenames from MusicBrainz and writes a `.cue` and `.log` that reference them,
+and editing a rip log is forbidden (2.2.10.9) — so renaming afterwards silently
+invalidates both. The only clean fix is to correct MusicBrainz and rip again,
+which costs ten seconds if you catch it up front and fifteen minutes if you
+don't. So `cdrip rip` checks the MusicBrainz titles it is about to use and
+stops before touching the drive (`--ignore-naming` to override):
+
+- **2.3.11.1** lookalike characters — U+2010 HYPHEN, non-breaking hyphen,
+  Cyrillic а/е/о/р/с/х and Greek Α/Ο passing as Latin. These are visually
+  identical to ASCII and break search, sorting and filename round-tripping.
+  Genuine typography (`…`, curly quotes, en/em dashes, accented letters) is
+  explicitly left alone — rewriting those is the pointless trump 2.3.18 rejects.
+- **2.3.20** leading/trailing whitespace, **2.3.18.2** ALL CAPS titles.
+
+**After the rip, in place.** Anything that touches neither filenames nor the
+decoded audio the log's CRCs are computed from:
+
+- **2.2.10.10** FLAC not at maximum compression — fixed automatically with
+  `salmon compress`. Safe: recompression changes no filename and no sample.
+- **2.3.16.4** missing required tags (Artist, Album, Title, TrackNumber)
+- **2.2.10.8** ID3 headers on FLAC files
+- **2.3.19** embedded artwork and padding over 1024 KiB
+
+**Structural, reported as blockers.** These mean the release is wrong, not
+merely trumpable:
+
+- **2.1.19.3** files from an enhanced CD's data track riding along — the MP3s
+  and video on a mixed-mode disc must not be in the torrent
+- **2.1.19** track count not matching the disc, **2.1.5.1** unsplit rips
+- **2.3.1** no audio in the folder, **2.3.3** unnecessary nested folders
+- **2.3.12** paths over 180 characters, **2.3.13** filenames without track
+  numbers
+
 
 ## Overlap with smoked-salmon
 

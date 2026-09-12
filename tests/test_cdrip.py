@@ -258,3 +258,138 @@ def test_wait_for_disc_gives_up_and_says_so(monkeypatch):
     said = []
     assert rip_mod.wait_for_disc("/dev/sr0", timeout=1, notify=said.append) is False
     assert said and "re-insert" in said[0].lower()
+
+
+# --- formatting rules --------------------------------------------------------
+#
+# The structural point these pin down: a filename problem has to be caught
+# BEFORE the rip. whipper writes a .cue and .log referencing the audio
+# filenames and editing a rip log is forbidden, so renaming afterwards
+# silently invalidates both. Tag and compression problems are different - they
+# change neither filenames nor decoded audio, so they are fixable in place.
+
+from cdrip import compliance
+
+
+def test_finds_the_real_hyphen_lookalike():
+    found = compliance.find_lookalikes("Curses! Another Shape‐Shifting Wraith!")
+    assert found == [("‐", "U+2010", "-")]
+
+
+def test_leaves_intentional_typography_alone():
+    """Rewriting a real ellipsis or curly quote is the pointless trump 2.3.18 rejects."""
+    assert compliance.find_lookalikes("That Was the Night Everything Changed…") == []
+    assert compliance.find_lookalikes("Don’t — Really") == []
+
+
+def test_catches_cyrillic_passing_as_latin():
+    found = compliance.find_lookalikes("Mоster of Puppets")  # Cyrillic o
+    assert found and found[0][2] == "o"
+
+
+def test_normalise_fixes_only_lookalikes():
+    src = "Shape‐Shifting…"
+    out = compliance.normalise_lookalikes(src)
+    assert out == "Shape-Shifting…"  # hyphen fixed, ellipsis kept
+
+
+def test_metadata_check_flags_lookalikes_before_ripping():
+    findings = compliance.check_metadata(
+        {1: "Curses! Another Shape‐Shifting Wraith!", 2: "A Band of Hunters Stalk in Edo"},
+        album="Virtue Has Few Friends",
+        artist="A Thousand Times Repent",
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "2.3.11.1"
+    assert "re-rip" in findings[0].message or "re-run" in findings[0].message.lower() \
+        or "renaming after the rip" in findings[0].message
+
+
+def test_metadata_check_clean_release_has_no_findings():
+    assert compliance.check_metadata(
+        {1: "A Band of Hunters Stalk in Edo", 2: "So Much for Middle-Earth"},
+        album="Virtue Has Few Friends", artist="A Thousand Times Repent",
+    ) == []
+
+
+def _release_folder(tmp_path, names):
+    """Build a fake release folder. metaflac/flac are stubbed by the caller."""
+    d = tmp_path / "Artist - Album (2007) [CD FLAC]"
+    d.mkdir()
+    for n in names:
+        (d / n).write_bytes(b"fLaC" + b"\0" * 64)
+    return d
+
+
+def _stub_tools(monkeypatch, tags=None, embedded=0, recompress_gain=0.0, id3=False):
+    tags = tags or {"ARTIST": "A", "ALBUM": "B", "TITLE": "C", "TRACKNUMBER": "1"}
+    monkeypatch.setattr(compliance, "_flac_tags", lambda p: dict(tags))
+    monkeypatch.setattr(compliance, "_embedded_bytes", lambda p: embedded)
+    monkeypatch.setattr(compliance, "_recompress_gain_pct", lambda p: recompress_gain)
+    monkeypatch.setattr(compliance, "_has_id3", lambda p: id3)
+
+
+def test_release_check_passes_a_clean_release(monkeypatch, tmp_path):
+    d = _release_folder(tmp_path, ["01 - One.flac", "02 - Two.flac"])
+    _stub_tools(monkeypatch)
+    findings = compliance.check_release(str(d), expect_tracks=2)
+    assert findings == [], [str(f) for f in findings]
+
+
+def test_release_check_flags_data_track_leftovers(monkeypatch, tmp_path):
+    """2.1.19.3 - an enhanced CD's MP3s and video must not ride along."""
+    d = _release_folder(tmp_path, ["01 - One.flac", "bonus.mp3", "sampler.mov"])
+    _stub_tools(monkeypatch)
+    findings = compliance.check_release(str(d))
+    rules = [f.rule for f in findings]
+    assert "2.1.19.3" in rules
+    assert any(f.severity == compliance.SEVERITY_BLOCKER for f in findings)
+
+
+def test_release_check_flags_missing_tracks(monkeypatch, tmp_path):
+    d = _release_folder(tmp_path, ["01 - One.flac"])
+    _stub_tools(monkeypatch)
+    findings = compliance.check_release(str(d), expect_tracks=6)
+    assert "2.1.19" in [f.rule for f in findings]
+
+
+def test_release_check_flags_uncompressed_flac_as_fixable(monkeypatch, tmp_path):
+    d = _release_folder(tmp_path, ["01 - One.flac"])
+    _stub_tools(monkeypatch, recompress_gain=3.16)
+    findings = compliance.check_release(str(d), expect_tracks=1)
+    hit = [f for f in findings if f.rule == "2.2.10.10"]
+    assert hit and hit[0].fixable_in_place
+
+
+def test_release_check_flags_missing_tags(monkeypatch, tmp_path):
+    d = _release_folder(tmp_path, ["01 - One.flac"])
+    _stub_tools(monkeypatch, tags={"ARTIST": "A"})
+    findings = compliance.check_release(str(d), expect_tracks=1)
+    hit = [f for f in findings if f.rule == "2.3.16.4"]
+    assert hit and "ALBUM" in hit[0].message and hit[0].fixable_in_place
+
+
+def test_release_check_flags_long_paths(monkeypatch, tmp_path):
+    # Lower the limit instead of creating a 200-character filename: Windows
+    # MAX_PATH refuses to create one, so the realistic fixture is unbuildable
+    # on this machine and would make the test platform-dependent.
+    monkeypatch.setattr(compliance, "MAX_PATH_LEN", 40)
+    d = _release_folder(tmp_path, ["01 - A Reasonably Long Track Title.flac"])
+    _stub_tools(monkeypatch)
+    findings = compliance.check_release(str(d), expect_tracks=1)
+    assert "2.3.12" in [f.rule for f in findings]
+
+
+def test_release_check_flags_missing_track_numbers(monkeypatch, tmp_path):
+    d = _release_folder(tmp_path, ["Opening Track.flac"])
+    _stub_tools(monkeypatch)
+    findings = compliance.check_release(str(d), expect_tracks=1)
+    assert "2.3.13" in [f.rule for f in findings]
+
+
+def test_blockers_are_separable_from_trumpables(monkeypatch, tmp_path):
+    d = _release_folder(tmp_path, ["01 - One.flac", "stray.mp3"])
+    _stub_tools(monkeypatch, recompress_gain=3.0)
+    findings = compliance.check_release(str(d))
+    assert compliance.blockers(findings)
+    assert len(compliance.blockers(findings)) < len(findings)
