@@ -1,19 +1,29 @@
-"""cdrip - rip an audio CD to verified FLAC, then hand it to smoked-salmon.
+"""cdrip - everything around a CD rip except, usually, the rip itself.
 
-The pipeline, and why each step is there:
+Two entry points, because which ripper you need depends on where the release
+is going.
 
-  1. read the TOC              - finds the audio tracks even on a mixed-mode
-                                 disc, where the OS shows only the data track
-  2. compute the disc ID       - libdiscid's mixed-mode lead-out convention
-  3. ask MusicBrainz           - unknown disc IDs are the normal case for
-                                 promos and small presses; offer to attach one
-  4. resolve the read offset   - from AccurateRip's drive database
-  5. check the drive cache     - a rip you cannot re-read is not verified
-  6. rip (twice if needed)     - whipper; a second pass replaces AccurateRip
-                                 when the disc is not in it
-  7. tag in place              - never rename, or the .cue and .log go stale
-  8. hand to salmon            - log check, integrity, upconversion, spectrals,
-                                 torrent
+``adopt`` takes a finished rip - EAC, XLD or whipper - and does everything
+after it: validate the log, check the formatting rules, enrich the metadata,
+detect a lossy master, hand off to smoked-salmon, make the torrent. This is
+the normal path for a tracker that only recognises EAC or XLD logs, because
+EAC cannot be driven from here: its command-line switches open the window and
+idle without ripping, and its window (class ``erstes``) exposes 56 UI
+Automation descendants of which exactly zero support InvokePattern, with no
+MenuBar at all. Its menus *are* real HMENUs, so WM_COMMAND can reach them, but
+the compressed-rip entries open dialogs - so the rip stays a human step.
+
+``rip`` drives whipper end to end and is still the right tool when the log
+does not have to satisfy a tracker's checker: archiving, or somewhere that
+accepts whipper. It handles the parts only the disc-side can: mixed-mode TOCs
+where the OS shows nothing but a data track, the AccurateRip drive offset,
+whether the drive's cache can be defeated, and a second pass when AccurateRip
+has never seen the disc.
+
+Either way the rules are the same: never rename after a rip, because the .cue
+and .log reference the filenames; and enrich metadata between the rip and the
+hand-off, because whipper writes tags during the rip and salmon reads them
+afterwards.
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ import sys
 from . import compliance as compliance_mod
 from . import config as config_mod
 from . import drive as drive_mod
+from . import eac as eac_mod
 from . import enrich as enrich_mod
 from . import musicbrainz as mb
 from . import rip as rip_mod
@@ -375,6 +386,85 @@ def _handoff(cfg, directory: str, log_path: str | None, args) -> int:
     return 0
 
 
+def cmd_adopt(args, cfg) -> int:
+    """Take a finished rip - from EAC, XLD or whipper - and do everything else.
+
+    This is the main entry point when the rip itself was not made here. EAC
+    cannot be driven headlessly (its CLI switches do not rip, and its window
+    exposes no actionable UI Automation controls), so for trackers that only
+    recognise EAC logs the rip is a human step and this picks up afterwards.
+
+    Order matters: validate the log first and stop on a blocker, because
+    everything downstream - spectrals, torrent, upload - is wasted effort on a
+    rip that will be rejected.
+    """
+    path = args.path
+    _section("Rip log")
+    log = riplog_mod.find_log(path)
+    if not log:
+        _echo("  no log in the release folder.")
+    else:
+        _echo("  %s" % os.path.basename(log))
+        facts = eac_mod.read_log(log)
+        _echo("  ripper        : %s" % (facts.ripper or "unknown"))
+        _echo("  read offset   : %s" % ("%+d" % facts.read_offset if facts.read_offset is not None else "-"))
+        _echo("  read mode     : %s" % (facts.read_mode or "-"))
+        _echo("  cache defeated: %s" % facts.cache_defeated)
+        _echo("  has checksum  : %s" % facts.has_checksum)
+        if facts.test_copy_pairs:
+            _echo("  test/copy CRCs: %d pairs, %s" % (
+                len(facts.test_copy_pairs),
+                "all match" if facts.crcs_match else "MISMATCH"))
+
+        problems = eac_mod.check_settings(facts, expected_offset=args.expect_offset)
+        for p in problems:
+            _echo("  ! %s" % p)
+
+        # EAC's own checker is the authority on whether a log will be accepted.
+        try:
+            verdict = eac_mod.check_log(log, checklog=args.checklog)
+            _echo("  CheckLog      : %s" % verdict.summary)
+            if not verdict.ok and not args.ignore_log:
+                _echo("")
+                _echo("  This log will not be accepted. Fix the rip rather than")
+                _echo("  uploading and reporting for manual review; use")
+                _echo("  --ignore-log to continue anyway.")
+                return 1
+        except FileNotFoundError as exc:
+            _echo("  CheckLog      : unavailable (%s)" % exc)
+
+    _section("Formatting rules")
+    findings = compliance_mod.check_release(path, expect_tracks=args.tracks)
+    for f in findings:
+        _echo("  %s" % f)
+    _echo("  %s" % compliance_mod.summarise(findings))
+    if compliance_mod.blockers(findings) and not args.ignore_rules:
+        _echo("  Blockers present; use --ignore-rules to continue anyway.")
+        return 1
+
+    if not args.no_enrich:
+        _section("Metadata enrichment")
+        meta = enrich_mod.collect(
+            path, label=args.label, catalogue=args.catalogue,
+            genres=list(args.genre) if args.genre else None,
+            discogs_release=args.discogs_release,
+        )
+        if meta.is_empty:
+            _echo("  nothing found - pass --label/--catalogue/--genre or --discogs-release.")
+        else:
+            _echo("  label     : %s" % (meta.label or "-"))
+            _echo("  catalogue : %s" % (meta.catalogue or "-"))
+            _echo("  genres    : %s" % (", ".join(meta.genres) or "-"))
+            _echo("  sources   : %s" % ", ".join(meta.sources))
+            _echo("  written to %d files (no renames)" % len(enrich_mod.apply(path, meta)))
+
+    if args.no_salmon:
+        _echo("")
+        _echo("Done (stopped before salmon): %s" % path)
+        return 0
+    return _handoff(cfg, path, log, args)
+
+
 def cmd_check(args, cfg) -> int:
     """Check a finished release folder against the formatting rules."""
     findings = compliance_mod.check_release(args.path)
@@ -453,6 +543,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_rip.add_argument("--no-torrent", action="store_true",
                        help="run salmon's checks and spectrals but make no torrent")
     p_rip.set_defaults(func=cmd_rip)
+
+    p_adopt = sub.add_parser(
+        "adopt",
+        help="take a finished rip (EAC/XLD/whipper) and run everything after it",
+    )
+    p_adopt.add_argument("path")
+    p_adopt.add_argument("--tracks", type=int, default=None,
+                         help="expected track count, to catch a missing track")
+    p_adopt.add_argument("--expect-offset", type=int, default=None,
+                         help="the drive's AccurateRip read offset, to catch a bit-shifted rip")
+    p_adopt.add_argument("--checklog", default=None,
+                         help="path to EAC's CheckLog.exe")
+    p_adopt.add_argument("--ignore-log", action="store_true",
+                         help="continue even if the log will not be accepted")
+    p_adopt.add_argument("--ignore-rules", action="store_true",
+                         help="continue even with blocking rule findings")
+    p_adopt.add_argument("--label", default=None)
+    p_adopt.add_argument("--catalogue", default=None)
+    p_adopt.add_argument("--genre", action="append")
+    p_adopt.add_argument("--discogs-release", default=None)
+    p_adopt.add_argument("--no-enrich", action="store_true")
+    p_adopt.add_argument("--no-salmon", action="store_true",
+                         help="stop before handing off to salmon")
+    p_adopt.add_argument("--no-torrent", action="store_true")
+    p_adopt.set_defaults(func=cmd_adopt)
 
     p_chk = sub.add_parser("check", help="check a finished release against the formatting rules")
     p_chk.add_argument("path")

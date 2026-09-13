@@ -3,11 +3,53 @@
 Rip an audio CD to verified FLAC, then hand it to
 [smoked-salmon](https://github.com/smokin-salmon/smoked-salmon).
 
-`cdrip` deliberately does **only** the parts salmon does not: driving the
-optical drive, and getting a disc ID into MusicBrainz. Everything after the
-disc read — rip-log validation, FLAC integrity, upconversion and MQA
-detection, spectrals, torrent creation — is salmon's, and is called rather
-than re-implemented.
+`cdrip` does the parts salmon does not: the optical drive, disc IDs, log
+validation and metadata enrichment. Everything salmon already owns — FLAC
+integrity, upconversion and MQA detection, spectrals, torrent creation,
+lossy-master measurement — is called rather than re-implemented.
+
+Two entry points:
+
+* **`cdrip adopt <path>`** — take a finished rip (EAC, XLD or whipper) and do
+  everything after it. This is the normal path for a tracker that only
+  recognises EAC or XLD logs.
+* **`cdrip rip`** — drive whipper end to end. Right when the log does not have
+  to satisfy a tracker's log checker.
+
+## Why `adopt` exists: EAC cannot be automated from here
+
+Measured, not assumed:
+
+* `EAC.exe` accepts `-DRIVE`, `-OUTPUTDIRECTORY`, `-TESTANDCOPY`, `-CLOSE`,
+  but they **do not start a rip**. Launched with all of them it opens its
+  window and idles — flat CPU, zero output files after 45 seconds. EAC's own
+  documentation only ever describes the crash-workaround switches
+  (`-nocdtext`, `-notestunit`, …), which is consistent.
+* **UI Automation can see EAC but not drive it.** Its window (class `erstes`)
+  exposes 56 descendants, every one a bare `Pane`, **none** supporting
+  InvokePattern, and no MenuBar. pywinauto's UIA backend is useless here.
+* Its menus **are** real `HMENU`s, so `WM_COMMAND` reaches them —
+  `Action → Test & Copy Selected Tracks → Compressed` is command id **771**.
+  But that entry opens a dialog, so posting the command is necessary and not
+  sufficient.
+
+So the rip is a human step, and `cdrip adopt` picks up immediately afterwards.
+Nothing else about the pipeline changes.
+
+## Log formats decide which ripper you need
+
+Some trackers identify a log purely by its header — RED accepts **"Exact Audio
+Copy"** or **"X Lossless Decoder"** and rejects everything else outright as
+*"Unrecognized log file!"*, scoring it `-1` and marking the torrent trumpable
+for "Bad/No Checksum(s)". That is not a judgement on the rip: the same whipper
+log reads as `Whipper`, `Integrity.Match`, score 100 in cambia, and its own
+SHA-256 verifies.
+
+`cdrip adopt` runs EAC's bundled **`CheckLog.exe`** over the log *before*
+anything is uploaded, so an unacceptable log is caught locally instead of by
+deleting a torrent. Note that CheckLog prints **nothing** for a file it does
+not recognise — silence means "not an EAC log", never "fine", and `cdrip`
+treats it that way.
 
 ## Why this exists
 

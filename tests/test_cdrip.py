@@ -578,3 +578,144 @@ def test_merge_does_not_overwrite_what_is_already_known():
 def test_empty_metadata_is_reported_as_empty():
     assert enrich.Metadata().is_empty
     assert not enrich.Metadata(genres=["Doom"]).is_empty
+
+
+# --- EAC log validation ------------------------------------------------------
+#
+# Some trackers identify a log purely by its header and reject anything that
+# isn't EAC or XLD - a whipper rip scoring 100 in cambia is still rejected as
+# "Unrecognized log file!". CheckLog.exe answers that locally, before an
+# upload. Its silence is the important case: it prints nothing for a file it
+# does not recognise, which must not be read as success.
+
+from cdrip import eac
+
+
+def test_checklog_silence_means_unrecognised_not_ok(monkeypatch, tmp_path):
+    log = tmp_path / "whipper.log"
+    log.write_text("Log created by: whipper 0.10.0\n", encoding="utf-8")
+    monkeypatch.setattr(eac, "find_checklog", lambda extra=None: "CheckLog.exe")
+
+    class P:
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(eac.subprocess, "run", lambda *a, **k: P())
+
+    v = eac.check_log(str(log))
+    assert not v.recognised
+    assert not v.ok
+    assert "not an EAC log" in v.summary
+
+
+def test_checklog_clean_verdict(monkeypatch, tmp_path):
+    log = tmp_path / "eac.log"
+    log.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(eac, "find_checklog", lambda extra=None: "CheckLog.exe")
+
+    class P:
+        stdout = ". Log entry is fine!\n"
+        stderr = ""
+    monkeypatch.setattr(eac.subprocess, "run", lambda *a, **k: P())
+
+    v = eac.check_log(str(log))
+    assert v.recognised and v.ok
+
+
+def test_checklog_modified_is_not_ok(monkeypatch, tmp_path):
+    log = tmp_path / "eac.log"
+    log.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(eac, "find_checklog", lambda extra=None: "CheckLog.exe")
+
+    class P:
+        stdout = ". Log entry was modified, checksum incorrect!\n"
+        stderr = ""
+    monkeypatch.setattr(eac.subprocess, "run", lambda *a, **k: P())
+
+    v = eac.check_log(str(log))
+    assert v.recognised and not v.ok
+
+
+EAC_LOG = """Exact Audio Copy V1.8 from 15. July 2024
+
+Used drive  : Slimtype DVD A  DS8A5SH   Adapter: 1  ID: 0
+
+Read mode               : Secure
+Utilize accurate stream : Yes
+Defeat audio cache      : Yes
+Make use of C2 pointers : No
+
+Read offset correction                      : 6
+
+Track  1
+     Test CRC C6C31298
+     Copy CRC C6C31298
+
+Track  2
+     Test CRC 4AA4BB66
+     Copy CRC 4AA4BB66
+
+==== Log checksum 1B9DA441B4485515F73EC544872BC3C6F8517D49412CD8494E2043D1091A33E1 ====
+"""
+
+
+def test_reads_the_settings_an_eac_log_records(tmp_path):
+    p = tmp_path / "eac.log"
+    p.write_text(EAC_LOG, encoding="utf-8")
+    f = eac.read_log(str(p))
+    assert f.ripper.lower().startswith("exact audio copy")
+    assert f.read_offset == 6
+    assert f.cache_defeated is True
+    assert f.accurate_stream is True
+    assert f.c2_pointers is False
+    assert f.read_mode == "Secure"
+    assert f.has_checksum
+    assert f.crcs_match
+
+
+def test_settings_check_passes_a_good_log(tmp_path):
+    p = tmp_path / "eac.log"
+    p.write_text(EAC_LOG, encoding="utf-8")
+    assert eac.check_settings(eac.read_log(str(p)), expected_offset=6) == []
+
+
+def test_settings_check_catches_a_wrong_offset(tmp_path):
+    p = tmp_path / "eac.log"
+    p.write_text(EAC_LOG.replace(": 6", ": 0"), encoding="utf-8")
+    problems = eac.check_settings(eac.read_log(str(p)), expected_offset=6)
+    assert any("bit-shifted" in x for x in problems)
+
+
+def test_settings_check_catches_a_missing_checksum(tmp_path):
+    p = tmp_path / "eac.log"
+    p.write_text(EAC_LOG.split("==== Log checksum")[0], encoding="utf-8")
+    problems = eac.check_settings(eac.read_log(str(p)))
+    assert any("no checksum" in x for x in problems)
+
+
+def test_settings_check_flags_a_whipper_log(tmp_path):
+    p = tmp_path / "w.log"
+    p.write_text("whipper 0.10.0\nRead offset correction : 6\n", encoding="utf-8")
+    problems = eac.check_settings(eac.read_log(str(p)))
+    assert any("whipper" in x for x in problems)
+
+
+def test_settings_check_catches_mismatched_crcs(tmp_path):
+    p = tmp_path / "eac.log"
+    p.write_text(EAC_LOG.replace("Copy CRC 4AA4BB66", "Copy CRC DEADBEEF"), encoding="utf-8")
+    problems = eac.check_settings(eac.read_log(str(p)), expected_offset=6)
+    assert any("not reproducible" in x for x in problems)
+
+
+def test_ripper_is_found_when_not_at_line_start(tmp_path):
+    """whipper writes "Log created by: whipper 0.10.0" - the name is not first.
+
+    Anchoring the ripper regex to line start matched EAC but silently missed
+    whipper, so the "this log will not be recognised" warning never fired on
+    exactly the logs that need it. Caught against a real whipper log.
+    """
+    p = tmp_path / "w.log"
+    p.write_text("Log created by: whipper 0.10.0 (internal logger)\n", encoding="utf-8")
+    facts = eac.read_log(str(p))
+    assert facts.ripper is not None
+    assert facts.ripper.lower() == "whipper"
+    assert any("whipper" in x for x in eac.check_settings(facts))
