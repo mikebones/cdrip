@@ -554,20 +554,47 @@ MENU_CUE_SINGLE_WAV = 535
 CUE_DIALOG = "Create CUE Sheet"
 
 
+# Gap detection shows its own progress window - "Analyzing", with "Detecting
+# Pre-Track Gaps" inside - NOT the "Extracting Audio Data" dialog a rip uses.
+# Waiting on the extraction dialog therefore returns instantly, and the cue is
+# then written from gap information that does not exist yet.
+ANALYZE_DIALOG = "Analyzing"
+
+
+def gaps_in_progress(pid: int | None = None) -> bool:
+    return find_dialog_containing(ANALYZE_DIALOG, pid) is not None
+
+
 def detect_gaps(main_hwnd: int, pid: int | None = None,
-                timeout: float = 1800.0, poll: float = 10.0) -> bool:
+                timeout: float = 1800.0, poll: float = 5.0,
+                start_timeout: float = 30.0) -> bool:
     """Run EAC's gap detection, which a compliant cue sheet depends on.
 
-    This reads the disc again, so it is not instant. Progress is reported
-    through the same extraction dialog a rip uses.
+    This reads the disc again, so it is not instant - minutes, not seconds.
+    Returns True when detection has finished.
     """
     from . import eacdrive
 
     eacdrive.post_command(main_hwnd, MENU_DETECT_GAPS)
-    time.sleep(5.0)
+
+    # Wait for the window to appear before waiting for it to go away, or a
+    # slow start looks like an instant finish.
+    appeared = False
+    start_deadline = time.time() + start_timeout
+    while time.time() < start_deadline:
+        if gaps_in_progress(pid):
+            appeared = True
+            break
+        time.sleep(0.5)
+    if not appeared:
+        # Gaps may already be known from an earlier pass, in which case EAC
+        # shows nothing at all. That is a legitimate success, not a failure.
+        return True
+
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if not rip_in_progress(pid):
+        if not gaps_in_progress(pid):
+            time.sleep(1.5)   # let EAC settle before the next command
             return True
         time.sleep(poll)
     raise TimeoutError("gap detection did not finish within %.0fs" % timeout)

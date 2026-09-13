@@ -122,3 +122,41 @@ def test_cue_variants_do_not_default_to_the_noncompliant_one():
 def test_detect_gaps_is_required_before_a_cue_is_meaningful():
     doc = eacwin.detect_gaps.__doc__ or ""
     assert "cue" in doc.lower()
+
+
+def test_gap_detection_watches_its_own_window_not_the_rip_one(monkeypatch):
+    """Gap detection shows "Analyzing", not "Extracting Audio Data".
+
+    Waiting on the extraction dialog returns instantly, so the cue then
+    gets written from gap information that does not exist yet - which is
+    exactly what happened.
+    """
+    seen = []
+    monkeypatch.setattr(eacwin, "find_dialog_containing",
+                        lambda needle, pid=None: seen.append(needle))
+    eacwin.gaps_in_progress()
+    assert seen == [eacwin.ANALYZE_DIALOG]
+    assert eacwin.ANALYZE_DIALOG != eacwin.RIP_DIALOG
+
+
+def test_detect_gaps_waits_for_the_window_to_appear_first(monkeypatch):
+    """A slow start must not look like an instant finish."""
+    from cdrip import eacdrive
+    monkeypatch.setattr(eacdrive, "post_command", lambda h, c: None)
+    monkeypatch.setattr(eacwin.time, "sleep", lambda s: None)
+    # Absent, absent, present, present, gone.
+    states = iter([False, False, True, True, False])
+    monkeypatch.setattr(eacwin, "gaps_in_progress",
+                        lambda pid=None: next(states, False))
+    assert eacwin.detect_gaps(1, timeout=100, poll=0.01,
+                              start_timeout=1.0) is True
+
+
+def test_detect_gaps_treats_an_absent_window_as_already_done(monkeypatch):
+    """EAC shows nothing when gaps are already known from an earlier pass."""
+    from cdrip import eacdrive
+    monkeypatch.setattr(eacdrive, "post_command", lambda h, c: None)
+    monkeypatch.setattr(eacwin.time, "sleep", lambda s: None)
+    monkeypatch.setattr(eacwin, "gaps_in_progress", lambda pid=None: False)
+    assert eacwin.detect_gaps(1, timeout=1, poll=0.01,
+                              start_timeout=0.05) is True
