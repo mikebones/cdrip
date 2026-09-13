@@ -719,3 +719,106 @@ def test_ripper_is_found_when_not_at_line_start(tmp_path):
     assert facts.ripper is not None
     assert facts.ripper.lower() == "whipper"
     assert any("whipper" in x for x in eac.check_settings(facts))
+
+
+# --- AccurateRip identity on a mixed-mode disc -------------------------------
+#
+# Fixtures are EAC's own AccurateRip-Offset-log.txt values for the real disc:
+#   FreedB 4f0c1b07, Added 000822ea, Multi 002e671b
+# whipper reported all six tracks absent from AccurateRip; EAC found every one
+# at confidence 2. Same disc, same drive - the disc IDs differed.
+
+from cdrip import accuraterip
+
+
+def test_matches_eacs_own_accuraterip_ids():
+    """The whole point: reproduce what EAC computed for this disc."""
+    ids = accuraterip.disc_ids(
+        audio_offsets=[0, 17137, 41076, 58018, 82973, 101543],
+        leadout=232479,          # real lead-out, past the data track
+        data_track_start=127577,
+    )
+    assert ids.id1 == 0x000822EA
+    assert ids.id2 == 0x002E671B
+    assert ids.cddb == 0x4F0C1B07
+    assert ids.track_count == 7      # the data track counts
+    assert ids.url_path == "dBAR-007-000822ea-002e671b-4f0c1b07.bin"
+
+
+def test_audio_only_leadout_gives_a_different_disc():
+    """Using the MusicBrainz mixed-mode lead-out asks about another disc."""
+    real = accuraterip.disc_ids([0, 17137, 41076, 58018, 82973, 101543],
+                                leadout=232479, data_track_start=127577)
+    audio_only = accuraterip.disc_ids([0, 17137, 41076, 58018, 82973, 101543],
+                                      leadout=116177)
+    assert audio_only.id1 != real.id1
+    assert audio_only.cddb != real.cddb
+
+
+def test_absence_is_inconclusive_on_a_mixed_mode_disc():
+    toc = build_toc(with_data_track=True)
+    assert accuraterip.absence_is_inconclusive(toc)
+    msg = accuraterip.explain_absence(toc)
+    assert "not conclusive" in msg
+    assert "confidence 2" in msg
+
+
+def test_absence_is_conclusive_on_an_audio_only_disc():
+    toc = build_toc(with_data_track=False)
+    assert not accuraterip.absence_is_inconclusive(toc)
+    assert "conclusive" in accuraterip.explain_absence(toc)
+
+
+def test_identities_for_reports_both_conventions():
+    ids = accuraterip.identities_for(build_toc(with_data_track=True))
+    assert "audio_only" in ids
+    # A mixed-mode TOC has no real disc lead-out recorded, so the AccurateRip
+    # identity cannot be computed from it alone - which is worth knowing.
+    assert "accuraterip" not in ids
+
+
+# --- EAC Win32 menu driving --------------------------------------------------
+#
+# EAC's CLI switches do not rip and its window exposes no actionable UI
+# Automation controls, but its menus are real HMENUs reachable via WM_COMMAND.
+# The trap below was hit live: "Uncompressed" contains "compressed", so a
+# substring match picks WAV (id 478) instead of FLAC (id 771).
+
+from cdrip import eacdrive
+
+
+def _menu():
+    P = eacdrive.MenuItem
+    return [
+        P(path=("Action", "Test  Copy Selected Tracks", "Uncompressed..."),
+          command_id=478, opens_dialog=True),
+        P(path=("Action", "Test  Copy Selected Tracks", "Compressed..."),
+          command_id=771, opens_dialog=True),
+        P(path=("Action", "Detect Gaps"), command_id=539, opens_dialog=False),
+        P(path=("Action", "Test Selected Tracks"), command_id=532, opens_dialog=False),
+    ]
+
+
+def test_rip_command_picks_compressed_not_uncompressed():
+    """The live bug: substring matching selected WAV output."""
+    item = eacdrive.find_rip_command(_menu())
+    assert item is not None
+    assert item.command_id == 771, "picked %r (id %d) - Uncompressed contains 'compressed'" % (
+        item.path[-1], item.command_id)
+    assert item.path[-1].lower().startswith("compressed")
+
+
+def test_rip_command_is_flagged_as_opening_a_dialog():
+    """Posting the command is necessary but not sufficient."""
+    assert eacdrive.find_rip_command(_menu()).opens_dialog
+
+
+def test_find_command_matches_on_the_whole_path():
+    assert eacdrive.find_command(_menu(), "detect gaps").command_id == 539
+    assert eacdrive.find_command(_menu(), "action", "test selected").command_id == 532
+    assert eacdrive.find_command(_menu(), "no such entry") is None
+
+
+def test_menu_item_renders_readably():
+    item = eacdrive.find_rip_command(_menu())
+    assert "771" in str(item) and "dialog" in str(item)

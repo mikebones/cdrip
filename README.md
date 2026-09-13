@@ -276,6 +276,57 @@ salmon uses) reads the identical log as `Whipper`, `Integrity.Match`, score
 So it is a formatting choice, **not** a way to pass an EAC log check. Verify
 against the tracker's own log checker before relying on it.
 
+## AccurateRip on a mixed-mode disc: absence is not evidence
+
+On an ordinary audio CD every tool agrees on a disc's AccurateRip identity. On
+a **mixed-mode** disc they do not, and the disagreement is silent — the lookup
+succeeds, returns nothing, and the ripper honestly reports "track not present
+in AccurateRip database".
+
+That happened here. whipper reported all six tracks absent; EAC, same disc,
+same drive, found **every track at confidence 2**. The disc was in AccurateRip
+all along.
+
+The cause is the lead-out. libdiscid (so whipper) applies the MusicBrainz rule
+for a trailing data track — lead-out becomes the data track's start minus
+11400 — because that makes a stable *MusicBrainz* disc ID. AccurateRip uses the
+**real** lead-out of the whole disc, and its CDDB component counts the data
+track. Verified against EAC's own `AccurateRip-Offset-log.txt`:
+
+```
+cddb 4f0c1b07 = 7 tracks (data track counted), real lead-out 232479
+id1  000822ea = sum(audio offsets) + real lead-out
+id2  002e671b = sum(offset_i x i) + real lead-out x (n+1)
+```
+
+`cdrip` computes both identities and says so. The practical rule: **on a
+mixed-mode disc, treat an empty AccurateRip result as inconclusive** rather
+than falling back to weaker verification — that inference cost three redundant
+rips before it was caught.
+
+## Driving EAC (Win32)
+
+Three approaches were measured on EAC 1.8:
+
+| Approach | Result |
+|---|---|
+| Command line (`-TESTANDCOPY`, …) | **Does not rip.** Opens the window and idles — flat CPU, no files after 45s |
+| UI Automation | **Sees but cannot act.** 56 descendants, all bare `Pane`, zero InvokePattern, no MenuBar |
+| **Win32 menus** | **Works.** Real `HMENU`s, walkable and triggerable via `WM_COMMAND` |
+
+`cdrip.eacdrive` walks EAC's menus and finds commands by path — 95 discovered
+on 1.8. The rip entry is `Action / Test & Copy Selected Tracks / Compressed…`
+(id **771** on this build; treat as an observation, not a constant — the module
+looks it up rather than hard-coding it).
+
+The honest limit: that entry ends in "…" because it opens a dialog, so posting
+the command starts the flow but does not finish it. This is assistance, not
+unattended automation, and the module says so.
+
+One trap worth knowing: match the leaf label **exactly**. `"Uncompressed…"`
+contains `"compressed"`, so a substring match silently selects WAV output
+(id 478) instead of FLAC. That bug was caught against the live app.
+
 ## Overlap with smoked-salmon
 
 Already in salmon, and called from here rather than rebuilt:

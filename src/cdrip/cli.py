@@ -67,6 +67,11 @@ def _describe_toc(toc: toc_mod.Toc, disc_id: str, submit_url: str) -> None:
     if toc.is_mixed_mode:
         _echo("  mixed-mode disc: a data track follows the audio programme.")
         _echo("  (This is why the OS may show only files and no music.)")
+        _echo("  NOTE: an empty AccurateRip result on this disc is NOT conclusive -")
+        _echo("  AccurateRip keys on the real lead-out and counts the data track,")
+        _echo("  so a ripper using the MusicBrainz mixed-mode rule asks about a")
+        _echo("  different disc. Verified case: whipper said all tracks absent")
+        _echo("  while EAC found every one at confidence 2.")
     _echo("  disc ID: %s" % disc_id)
     _echo("  submit : %s" % submit_url)
 
