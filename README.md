@@ -59,7 +59,7 @@ pip install -e .
 cdrip info                    # TOC, disc ID, drive offset, MusicBrainz status
 cdrip submit-discid --artist "..." --album "..."
 cdrip rip --name "Artist - Album (2007) [CD FLAC]"
-cdrip check /path/to/release          # formatting rules only
+cdrip check /path/to/release          # formatting rules + rip-log facts
 cdrip finish /path/to/existing/rip    # just the salmon stages
 ```
 
@@ -90,8 +90,10 @@ cdrip finish /path/to/existing/rip    # just the salmon stages
    audio filenames, and renaming afterwards silently invalidates both, which a
    tracker's log checker will reject. If you want proper filenames, attach the
    disc ID to MusicBrainz and re-rip so whipper gets it right at source.
-8. **Hand to salmon** for checks, spectrals and the torrent.
-9. **Check for a lossy master** — see below.
+8. **Enrich the metadata** — see below. This is the only stage that adds
+   label, catalogue number and genre, and it has to sit here.
+9. **Hand to salmon** for checks, spectrals and the torrent.
+10. **Check for a lossy master** — see below.
 
 ## Lossless rip vs lossy master
 
@@ -168,6 +170,69 @@ merely trumpable:
 - **2.3.12** paths over 180 characters, **2.3.13** filenames without track
   numbers
 
+
+## Metadata enrichment, and why it runs where it does
+
+whipper tags from MusicBrainz, which is authoritative for titles and track
+order but frequently carries **no label, no catalogue number and no genre** —
+for small-label releases it often records the label as the literal string
+`[no label]`. Those three matter downstream: a tracker wants edition
+information for a CD-sourced rip (RED 2.1.22), and salmon builds its upload
+payload by *reading the files*, looking for
+`label`/`recordlabel`/`organization`/`publisher` and
+`catalognumber`/`labelno`/`catno`. Silent files mean an upload with no edition
+information and no tags.
+
+So `cdrip rip` runs enrichment **after the rip and before the hand-off**:
+
+* not earlier — whipper writes tags during the rip, so anything set beforehand
+  is overwritten;
+* not later — salmon needs the fields to exist to build its payload.
+
+It never renames anything, so the `.cue` and `.log` stay valid.
+
+Sources, in order:
+
+1. **MusicBrainz** — genres from the release group and artist; label and
+   catalogue number when present. No credentials needed. `[no label]` is
+   recognised as the placeholder it is and ignored.
+2. **Discogs** — often has label and catalogue number where MusicBrainz does
+   not, plus genres and styles (styles are preferred: Discogs files metal under
+   the genre "Rock" and the style "Deathcore"). Looking a release up *by id*
+   needs no authentication; *searching* does — so an id has to come from a
+   MusicBrainz url relation or from `--discogs-release`.
+3. **Explicit** `--label`, `--catalogue`, `--genre` always win.
+
+```sh
+cdrip rip --discogs-release 4062910          # label/catalogue/genres from Discogs
+cdrip rip --label "Tribunal Records" --catalogue TRB092 --genre Deathcore
+cdrip rip --no-enrich                        # skip it
+```
+
+## A note on log formats and tracker log checkers
+
+whipper writes its own log format, headed `Log created by: whipper`, with a
+`SHA-256 hash:` line of its own design. Some tracker log checkers identify a
+log purely by its header — RED's accepts **"Exact Audio Copy"** or **"X
+Lossless Decoder"** and rejects anything else outright as *"Unrecognized log
+file!"*, scoring it `-1` and marking the torrent trumpable for
+"Bad/No Checksum(s)". That is not a comment on the rip: cambia (the same parser
+salmon uses) reads the identical log as `Whipper`, `Integrity.Match`, score
+100.
+
+`whipper-plugin-eaclogger` adds an `eac` logger, exposed here as
+`--logger eac`. Be clear about what it does and does not do:
+
+* it writes EAC's **layout**, which is easier for a human to read;
+* it still headers itself `whipper version X (eac logger Y)` — it does **not**
+  claim to be EAC, which is the honest behaviour and keeps it clear of
+  RED 2.2.10.9.1 (forging log data costs your uploading privileges);
+* its `==== Log checksum ====` line is a SHA-256 that EAC's checker cannot
+  verify. The plugin's own source says so: *"It isn't compatible with EAC's
+  one: checklog fail"*.
+
+So it is a formatting choice, **not** a way to pass an EAC log check. Verify
+against the tracker's own log checker before relying on it.
 
 ## Overlap with smoked-salmon
 

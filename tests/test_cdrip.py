@@ -393,3 +393,188 @@ def test_blockers_are_separable_from_trumpables(monkeypatch, tmp_path):
     findings = compliance.check_release(str(d))
     assert compliance.blockers(findings)
     assert len(compliance.blockers(findings)) < len(findings)
+
+
+# --- rip log facts -----------------------------------------------------------
+#
+# Two rules can only be answered by the log: nothing survives into the FLACs
+# to say whether the disc was a pressed CD or a CD-R, or whether it carried
+# pre-emphasis. whipper writes both and nothing read them until now.
+
+from cdrip import riplog
+
+WHIPPER_LOG = """Log created by: whipper 0.10.0 (internal logger)
+
+Ripping phase information:
+  Drive: SlimtypeDVD A  DS8A5SH   (revision XAA2)
+  Defeat audio cache: true
+  Read offset correction: 6
+  Overread into lead-out: false
+  Gap detection: cdrdao 1.2.4
+  CD-R detected: false
+
+Tracks:
+  1:
+    Filename: 01 - One.flac
+    Peak level: 1.0
+    Pre-emphasis: false
+    Test CRC: C6C31298
+    Copy CRC: C6C31298
+
+  2:
+    Filename: 02 - Two.flac
+    Peak level: 0.9
+    Pre-emphasis: true
+    Test CRC: 4AA4BB66
+    Copy CRC: 4AA4BB66
+"""
+
+
+def _write_log(tmp_path, text):
+    d = tmp_path / "release"
+    d.mkdir(exist_ok=True)
+    (d / "Artist - Album.log").write_text(text, encoding="utf-8")
+    return d
+
+
+def test_reads_the_facts_only_the_log_knows(tmp_path):
+    d = _write_log(tmp_path, WHIPPER_LOG)
+    facts = riplog.read_log(str(d / "Artist - Album.log"))
+    assert facts.cdr_detected is False
+    assert facts.cache_defeated is True
+    assert facts.read_offset == 6
+    assert facts.preemphasised_tracks == (2,)
+    assert facts.has_preemphasis
+
+
+def test_preemphasis_is_attributed_to_the_right_track(tmp_path):
+    """Track 1 says false, track 2 says true - order must not smear."""
+    d = _write_log(tmp_path, WHIPPER_LOG)
+    facts = riplog.read_log(str(d / "Artist - Album.log"))
+    assert 1 not in facts.preemphasised_tracks
+    assert 2 in facts.preemphasised_tracks
+
+
+def test_cdr_rip_is_a_blocker(tmp_path):
+    """2.2.10.1 - a CD-R copy is not an acceptable source."""
+    d = _write_log(tmp_path, WHIPPER_LOG.replace("CD-R detected: false",
+                                                 "CD-R detected: true"))
+    findings = riplog.check_log(str(d))
+    rules = [r for r, _, _ in findings]
+    assert "2.2.10.1" in rules
+    assert any(sev == "blocker" for _, sev, _ in findings)
+
+
+def test_clean_pressed_cd_raises_no_blocker(tmp_path):
+    d = _write_log(tmp_path, WHIPPER_LOG.replace("Pre-emphasis: true",
+                                                 "Pre-emphasis: false"))
+    findings = riplog.check_log(str(d))
+    assert not [f for f in findings if f[1] == "blocker"]
+
+
+def test_preemphasis_is_reported_but_not_a_blocker(tmp_path):
+    """Allowed in lossless; it just forces its own edition."""
+    d = _write_log(tmp_path, WHIPPER_LOG)
+    findings = riplog.check_log(str(d))
+    hit = [f for f in findings if f[0] == "2.1.21"]
+    assert hit and hit[0][1] == "info"
+    assert "own edition" in hit[0][2]
+
+
+def test_undefeated_cache_is_surfaced(tmp_path):
+    d = _write_log(tmp_path, WHIPPER_LOG.replace("Defeat audio cache: true",
+                                                 "Defeat audio cache: false"))
+    findings = riplog.check_log(str(d))
+    assert "2.2.10.3" in [r for r, _, _ in findings]
+
+
+def test_missing_log_is_trumpable(tmp_path):
+    d = tmp_path / "nolog"
+    d.mkdir()
+    findings = riplog.check_log(str(d))
+    assert findings and findings[0][0] == "2.2.10.2"
+
+
+# --- metadata enrichment -----------------------------------------------------
+#
+# whipper tags from MusicBrainz, which for plenty of small-label releases has
+# no label, no catalogue number and no genre. salmon builds its upload payload
+# by reading exactly those fields off the files, so if they are empty the
+# upload goes out with no edition information. This stage fills them AFTER the
+# rip (whipper would overwrite anything earlier) and BEFORE the hand-off.
+
+from cdrip import enrich
+
+
+def test_titlecase_turns_tracker_tags_into_genres():
+    assert enrich._titlecase_tag("hardcore.punk") == "Hardcore Punk"
+    assert enrich._titlecase_tag("deathcore") == "Deathcore"
+
+
+def test_musicbrainz_no_label_placeholder_is_not_treated_as_a_label(monkeypatch):
+    """MusicBrainz writes the literal "[no label]" for white-label releases."""
+    monkeypatch.setattr(enrich, "_get_json", lambda url, timeout=30: {
+        "label-info": [{"label": {"name": "[no label]"}, "catalog-number": None}],
+        "genres": [], "release-group": {},
+    })
+    meta = enrich.from_musicbrainz("some-mbid")
+    assert meta.label is None
+    assert meta.catalogue is None
+
+
+def test_musicbrainz_real_label_is_used(monkeypatch):
+    monkeypatch.setattr(enrich, "_get_json", lambda url, timeout=30: {
+        "label-info": [{"label": {"name": "Tribunal Records"}, "catalog-number": "TRB092"}],
+        "genres": [{"name": "deathcore"}], "release-group": {},
+    })
+    meta = enrich.from_musicbrainz("some-mbid")
+    assert meta.label == "Tribunal Records"
+    assert meta.catalogue == "TRB092"
+    assert meta.genres == ["Deathcore"]
+
+
+def test_discogs_prefers_styles_over_broad_genres(monkeypatch):
+    """Discogs "genres" are broad (Rock); "styles" are what a tracker tags."""
+    monkeypatch.setattr(enrich, "_get_json", lambda url, timeout=30: {
+        "labels": [{"name": "Tribunal Records", "catno": "TRB092"}],
+        "genres": ["Rock"], "styles": ["Deathcore"],
+    })
+    meta = enrich.from_discogs("4062910")
+    assert meta.label == "Tribunal Records"
+    assert meta.catalogue == "TRB092"
+    assert meta.genres[0] == "Deathcore"   # style first
+    assert "Rock" in meta.genres
+
+
+def test_discogs_release_id_extracted_from_a_musicbrainz_url_rel(monkeypatch):
+    monkeypatch.setattr(enrich, "_get_json", lambda url, timeout=30: {
+        "relations": [
+            {"type": "discogs", "url": {"resource": "https://www.discogs.com/release/4062910-A-Thousand"}},
+        ]
+    })
+    assert enrich.discogs_release_from_musicbrainz("mbid") == "4062910"
+
+
+def test_no_discogs_relation_returns_none(monkeypatch):
+    monkeypatch.setattr(enrich, "_get_json", lambda url, timeout=30: {"relations": []})
+    assert enrich.discogs_release_from_musicbrainz("mbid") is None
+
+
+def test_explicit_values_win_over_lookups(monkeypatch):
+    monkeypatch.setattr(enrich, "release_mbid_from_files", lambda d: None)
+    meta = enrich.collect("/nowhere", label="My Label", catalogue="CAT1", genres=["Doom"])
+    assert (meta.label, meta.catalogue, meta.genres) == ("My Label", "CAT1", ["Doom"])
+    assert "explicit" in meta.sources
+
+
+def test_merge_does_not_overwrite_what_is_already_known():
+    a = enrich.Metadata(label="First", genres=["Doom"])
+    a.merge(enrich.Metadata(label="Second", catalogue="C2", genres=["Doom", "Sludge"]))
+    assert a.label == "First"          # first source wins
+    assert a.catalogue == "C2"         # gap filled
+    assert a.genres == ["Doom", "Sludge"]   # union, no duplicates
+
+
+def test_empty_metadata_is_reported_as_empty():
+    assert enrich.Metadata().is_empty
+    assert not enrich.Metadata(genres=["Doom"]).is_empty

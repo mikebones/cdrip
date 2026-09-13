@@ -26,8 +26,10 @@ import sys
 from . import compliance as compliance_mod
 from . import config as config_mod
 from . import drive as drive_mod
+from . import enrich as enrich_mod
 from . import musicbrainz as mb
 from . import rip as rip_mod
+from . import riplog as riplog_mod
 from . import salmon as salmon_mod
 from . import tagging
 from . import toc as toc_mod
@@ -232,6 +234,7 @@ def cmd_rip(args, cfg) -> int:
         _echo("  ripping twice and comparing (this disc cannot be AccurateRip-verified)")
         first, comparisons = rip_mod.double_rip(
             base, offset, name, device=target.device, unknown=not known,
+            logger=args.logger,
             notify=lambda msg: _echo("  %s" % msg),
         )
         _section("Verification")
@@ -249,7 +252,7 @@ def cmd_rip(args, cfg) -> int:
     else:
         result = rip_mod.rip(
             os.path.join(base, "pass1"), offset, name,
-            device=target.device, unknown=not known,
+            device=target.device, unknown=not known, logger=args.logger,
         )
 
     if release is not None:
@@ -257,6 +260,32 @@ def cmd_rip(args, cfg) -> int:
         for path in tagging.apply(result.directory, release):
             _echo("  tagged %s" % os.path.basename(path))
         _echo("  (files deliberately not renamed - the .cue and .log reference them)")
+
+    # Enrichment goes HERE: after the rip, before the hand-off. whipper writes
+    # tags from MusicBrainz during the rip, so anything set earlier is
+    # overwritten; and salmon builds its upload payload by reading these
+    # fields, so they must exist before it runs. Nothing is renamed, so the
+    # .cue and .log stay valid.
+    if not args.no_enrich:
+        _section("Metadata enrichment")
+        meta = enrich_mod.collect(
+            result.directory,
+            label=args.label,
+            catalogue=args.catalogue,
+            genres=list(args.genre) if args.genre else None,
+            discogs_release=args.discogs_release,
+        )
+        if meta.is_empty:
+            _echo("  nothing found - no label, catalogue number or genres.")
+            _echo("  MusicBrainz frequently has none of these. Pass --label/")
+            _echo("  --catalogue/--genre, or --discogs-release <id>.")
+        else:
+            _echo("  label     : %s" % (meta.label or "-"))
+            _echo("  catalogue : %s" % (meta.catalogue or "-"))
+            _echo("  genres    : %s" % (", ".join(meta.genres) or "-"))
+            _echo("  sources   : %s" % ", ".join(meta.sources))
+            written = enrich_mod.apply(result.directory, meta)
+            _echo("  written to %d files (no renames)" % len(written))
 
     if args.skip_salmon:
         _echo("\nDone: %s" % result.directory)
@@ -351,9 +380,20 @@ def cmd_check(args, cfg) -> int:
     findings = compliance_mod.check_release(args.path)
     for f in findings:
         _echo("  %s" % f)
+
+    # The log answers two things the files cannot: what kind of disc this was
+    # (2.2.10.1) and whether it carried pre-emphasis (2.1.21).
+    log_findings = riplog_mod.check_log(args.path)
+    for rule, severity, message in log_findings:
+        mark = {"blocker": "BLOCK", "trumpable": "TRUMP", "info": "info "}[severity]
+        _echo("  %s %-10s %s" % (mark, rule, message))
+
     _echo("")
     _echo(compliance_mod.summarise(findings))
-    return 1 if compliance_mod.blockers(findings) else 0
+    blocked = compliance_mod.blockers(findings) or [
+        f for f in log_findings if f[1] == "blocker"
+    ]
+    return 1 if blocked else 0
 
 
 def cmd_finish(args, cfg) -> int:
@@ -393,6 +433,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_rip.add_argument("--ignore-naming", action="store_true",
                        help="rip even when the MusicBrainz titles contain "
                             "lookalike characters")
+    p_rip.add_argument("--logger", default=None,
+                       help="whipper logger to use (e.g. 'eac' with "
+                            "whipper-plugin-eaclogger). Changes the log's "
+                            "layout only - it does NOT make the log pass an "
+                            "EAC log check.")
+    p_rip.add_argument("--label", default=None, help="record label for the edition")
+    p_rip.add_argument("--catalogue", default=None, help="catalogue number for the edition")
+    p_rip.add_argument("--genre", action="append", help="genre (repeatable)")
+    p_rip.add_argument("--discogs-release", default=None,
+                       help="Discogs release id, for label/catalogue/genres that "
+                            "MusicBrainz does not carry")
+    p_rip.add_argument("--no-enrich", action="store_true",
+                       help="skip metadata enrichment after the rip")
     p_rip.add_argument("--force", action="store_true",
                        help="rip even if the drive cache cannot be defeated")
     p_rip.add_argument("--skip-salmon", action="store_true",

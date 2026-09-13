@@ -62,6 +62,7 @@ def rip(
     track_template: str = "%t",
     device: str = "/dev/cdrom",
     unknown: bool = False,
+    logger: str | None = None,
     extra_args: tuple[str, ...] = (),
 ) -> RipResult:
     """Run ``whipper cd rip`` into ``output_dir``.
@@ -83,6 +84,22 @@ def rip(
     ]
     if unknown:
         cmd.append("--unknown")
+    if logger:
+        # whipper's own log format is not recognised by every tracker's log
+        # checker - RED's identifies logs by an "Exact Audio Copy" or
+        # "X Lossless Decoder" header and rejects anything else as
+        # "Unrecognized log file!".
+        #
+        # whipper-plugin-eaclogger adds an "eac" logger that writes EAC's
+        # LAYOUT, which helps a human read it, but it still headers itself
+        # "whipper version X (eac logger Y)" and its "==== Log checksum ===="
+        # line is a SHA-256 that EAC's checker cannot verify - the plugin's
+        # own source says "It isn't compatible with EAC's one: checklog fail".
+        #
+        # So this is a formatting choice, not a way to pass an EAC log check,
+        # and it must not be presented as one. Verify against the tracker's
+        # own log checker before relying on it.
+        cmd.extend(["--logger", logger])
     cmd.extend(extra_args)
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -193,6 +210,7 @@ def double_rip(
     disc_template: str,
     device: str = "/dev/cdrom",
     unknown: bool = False,
+    logger: str | None = None,
     notify=None,
 ) -> tuple[RipResult, list[TrackComparison]]:
     """Rip twice into ``base_dir``/pass1 and pass2 and compare.
@@ -202,7 +220,7 @@ def double_rip(
     """
     first = rip(
         os.path.join(base_dir, "pass1"), offset, disc_template,
-        device=device, unknown=unknown,
+        device=device, unknown=unknown, logger=logger,
     )
     if not wait_for_disc(device, notify=notify):
         raise RipError(
@@ -211,6 +229,6 @@ def double_rip(
         )
     second = rip(
         os.path.join(base_dir, "pass2"), offset, disc_template,
-        device=device, unknown=unknown,
+        device=device, unknown=unknown, logger=logger,
     )
     return first, compare(first, second)
