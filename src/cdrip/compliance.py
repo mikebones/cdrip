@@ -26,6 +26,8 @@ import subprocess
 import unicodedata
 from dataclasses import dataclass
 
+from . import flactools
+
 # 2.3.12 - path length, counted from the release folder down.
 MAX_PATH_LEN = 180
 
@@ -133,7 +135,8 @@ def check_metadata(titles: dict[int, str], album: str = "", artist: str = "") ->
 
 def _flac_tags(path: str) -> dict[str, str]:
     proc = subprocess.run(
-        ["metaflac", "--export-tags-to=-", path], capture_output=True, text=True
+        [flactools.require("metaflac"), "--export-tags-to=-", path], capture_output=True, text=True,
+        encoding="utf-8", errors="replace"
     )
     tags = {}
     for line in proc.stdout.splitlines():
@@ -155,8 +158,9 @@ def _has_id3(path: str) -> bool:
 def _embedded_bytes(path: str) -> int:
     """Size of embedded pictures plus padding (2.3.19)."""
     proc = subprocess.run(
-        ["metaflac", "--list", "--block-type=PICTURE,PADDING", path],
+        [flactools.require("metaflac"), "--list", "--block-type=PICTURE,PADDING", path],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
     )
     total = 0
     for line in proc.stdout.splitlines():
@@ -180,8 +184,9 @@ def _recompress_gain_pct(path: str) -> float | None:
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "test.flac")
         proc = subprocess.run(
-            ["flac", "-s", "-8", "-f", "-o", out, path],
+            [flactools.require("flac"), "-s", "-8", "-f", "-o", out, path],
             capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         )
         if proc.returncode != 0 or not os.path.exists(out):
             return None

@@ -31,6 +31,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from . import flactools
+
 
 class RipError(RuntimeError):
     pass
@@ -102,7 +104,8 @@ def rip(
         cmd.extend(["--logger", logger])
     cmd.extend(extra_args)
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RipError(
             "whipper exited %d\n%s" % (proc.returncode, (proc.stdout + proc.stderr)[-3000:])
@@ -136,10 +139,11 @@ def flac_md5(path: str) -> str:
     This is the right comparison for rip verification: it ignores tags and
     container differences and compares only the PCM the two rips produced.
     """
-    if not shutil.which("metaflac"):
+    if not flactools.available("metaflac"):
         raise RipError("metaflac not found; install the flac package")
     proc = subprocess.run(
-        ["metaflac", "--show-md5sum", path], capture_output=True, text=True
+        [flactools.require("metaflac"), "--show-md5sum", path], capture_output=True, text=True,
+        encoding="utf-8", errors="replace"
     )
     if proc.returncode != 0:
         raise RipError("metaflac failed on %s: %s" % (path, proc.stderr.strip()))
@@ -166,7 +170,8 @@ def compare(first: RipResult, second: RipResult) -> list[TrackComparison]:
 def disc_present(device: str = "/dev/cdrom") -> bool:
     """Whether the drive currently reports an audio disc."""
     proc = subprocess.run(
-        ["cd-paranoia", "-d", device, "-Q"], capture_output=True, text=True
+        ["cd-paranoia", "-d", device, "-Q"], capture_output=True, text=True,
+        encoding="utf-8", errors="replace"
     )
     text = proc.stdout + proc.stderr
     return "No medium found" not in text and "Unable find" not in text
@@ -189,7 +194,8 @@ def wait_for_disc(
     if disc_present(device):
         return True
 
-    subprocess.run(["eject", "-t", device], capture_output=True, text=True)
+    subprocess.run(["eject", "-t", device], capture_output=True, text=True,
+        encoding="utf-8", errors="replace")
     if disc_present(device):
         return True
 

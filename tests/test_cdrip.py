@@ -604,7 +604,11 @@ def test_checklog_silence_means_unrecognised_not_ok(monkeypatch, tmp_path):
     v = eac.check_log(str(log))
     assert not v.recognised
     assert not v.ok
-    assert "not an EAC log" in v.summary
+    # Silence used to be read as "not an EAC log". It is not: CheckLog.exe
+    # was measured writing nothing and exiting 0 for a correctly signed log
+    # too, so its silence carries no information either way.
+    assert v.inconclusive
+    assert "NOT evidence" in v.summary
 
 
 def test_checklog_clean_verdict(monkeypatch, tmp_path):
@@ -822,3 +826,25 @@ def test_find_command_matches_on_the_whole_path():
 def test_menu_item_renders_readably():
     item = eacdrive.find_rip_command(_menu())
     assert "771" in str(item) and "dialog" in str(item)
+
+
+def test_checklog_silence_is_not_read_as_a_failing_log():
+    """CheckLog.exe writes nothing and exits 0 for good and bad logs alike.
+
+    Inferring "not an EAC log" from that silence made the gate reject
+    everything while looking like it worked.
+    """
+    from cdrip import eac
+    verdict = eac.LogVerdict(path="x.log", recognised=False, entries=())
+    assert verdict.inconclusive
+    assert "NOT evidence" in verdict.summary
+    assert "cambia" in verdict.summary
+
+
+def test_a_real_checklog_verdict_is_still_honoured():
+    from cdrip import eac
+    good = eac.LogVerdict(path="x", recognised=True, entries=(eac.VERDICT_OK,))
+    assert good.ok and not good.inconclusive
+    bad = eac.LogVerdict(path="x", recognised=True,
+                         entries=(eac.VERDICT_NO_CHECKSUM,))
+    assert not bad.ok and not bad.inconclusive

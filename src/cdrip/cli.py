@@ -35,6 +35,7 @@ import sys
 
 from . import compliance as compliance_mod
 from . import config as config_mod
+from . import cue as cue_mod
 from . import drive as drive_mod
 from . import eac as eac_mod
 from . import eacprofile as eacprofile_mod
@@ -429,18 +430,29 @@ def cmd_adopt(args, cfg) -> int:
         for p in problems:
             _echo("  ! %s" % p)
 
-        # EAC's own checker is the authority on whether a log will be accepted.
+        # CheckLog.exe is consulted but cannot be relied on: on EAC 1.8 it
+        # writes nothing and exits 0 for signed and unsigned logs alike, so
+        # its silence is not a verdict. The gate below is built on facts read
+        # out of the log itself, which are checkable here.
         try:
             verdict = eac_mod.check_log(log, checklog=args.checklog)
-            _echo("  CheckLog      : %s" % verdict.summary)
-            if not verdict.ok and not args.ignore_log:
-                _echo("")
-                _echo("  This log will not be accepted. Fix the rip rather than")
-                _echo("  uploading and reporting for manual review; use")
-                _echo("  --ignore-log to continue anyway.")
-                return 1
-        except FileNotFoundError as exc:
-            _echo("  CheckLog      : unavailable (%s)" % exc)
+            if not verdict.inconclusive:
+                _echo("  CheckLog      : %s" % verdict.summary)
+                if not verdict.ok and not args.ignore_log:
+                    _echo("")
+                    _echo("  This log will not be accepted. Fix the rip rather")
+                    _echo("  than uploading and reporting for manual review;")
+                    _echo("  use --ignore-log to continue anyway.")
+                    return 1
+        except FileNotFoundError:
+            pass
+
+        if problems and not args.ignore_log:
+            _echo("")
+            _echo("  Refusing to continue: the log records a problem that the")
+            _echo("  tracker will see too. Fix the rip rather than uploading")
+            _echo("  and reporting for manual review; --ignore-log overrides.")
+            return 1
 
     _section("Formatting rules")
     findings = compliance_mod.check_release(path, expect_tracks=args.tracks)
@@ -763,6 +775,15 @@ def cmd_eac_rip(args, cfg) -> int:
             full = os.path.join(args.output_dir, name)
             if os.path.isfile(full):
                 _echo("  %10d  %s" % (os.path.getsize(full), name))
+    # EAC leaves the extraction dialog up after a finished rip and does not
+    # write its log until that dialog is closed, so a rip that is "done" has
+    # no log beside it until this happens. Always dismiss it.
+    eacwin_mod.dismiss_rip_dialog(args.pid)
+
+    if args.cue:
+        _write_cue(main, args, args.pid)
+
+    if args.output_dir and os.path.isdir(args.output_dir):
         _echo("")
         _echo("Next: cdrip adopt %s --tracks N --expect-offset %s"
               % (args.output_dir, args.offset if args.offset is not None else "?"))
@@ -810,6 +831,47 @@ def cmd_rules(args, cfg) -> int:
         _section("Not mechanically checkable")
         for rule in cov.not_mechanical:
             _echo("  %-12s %s" % (rule.number, rule.not_mechanical))
+    return 0
+
+
+def _write_cue(main, args, pid) -> int:
+    """Gap-detect and write a cue sheet next to the rip.
+
+    Separate from the rip on purpose: a cue is built from the disc's TOC and
+    gap information, not from the extracted audio, so it can be produced at
+    any time the disc is still in the drive. A missing cue never requires
+    re-ripping.
+    """
+    from . import eacwin as eacwin_mod
+
+    _section("Cue sheet")
+    _echo("  RED 2.2.10.7: a 100% log rip with no cue can be trumped by one "
+          "with even a noncompliant cue.")
+
+    artist = eacwin_mod.get_text(
+        eacwin_mod.control(main, eacwin_mod.MAIN_FIELDS["artist"]) or 0)
+    album = eacwin_mod.get_text(
+        eacwin_mod.control(main, eacwin_mod.MAIN_FIELDS["title"]) or 0)
+    if not (artist and album):
+        _echo("  EAC has no CD artist/title, so there is no name for the cue.")
+        return 1
+    target = os.path.join(args.output_dir or ".",
+                          "%s - %s.cue" % (artist, album))
+
+    _echo("  detecting gaps (a separate pass over the disc)")
+    eacwin_mod.detect_gaps(main, pid)
+    _echo("  writing %s" % os.path.basename(target))
+    eacwin_mod.create_cue(main, target, pid)
+
+    if not os.path.isfile(target):
+        _echo("  cue was not written")
+        return 1
+
+    # EAC names the cue's FILE lines after the WAV it extracted, but the WAVs
+    # are gone - they were replaced by the compressed files. A cue pointing at
+    # files that do not exist is worse than none, so check rather than assume.
+    fixed = cue_mod.retarget(target, os.path.dirname(target))
+    _echo("  %s" % fixed)
     return 0
 
 
@@ -942,6 +1004,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_eacrip.add_argument("--ignore-settings", action="store_true",
                           help="rip even with wrong settings")
     p_eacrip.add_argument("--timeout", type=float, default=7200.0)
+    p_eacrip.add_argument("--cue", action="store_true",
+                          help="detect gaps and write a cue sheet after the "
+                               "rip (RED 2.2.10.7)")
     p_eacrip.set_defaults(func=cmd_eac_rip)
 
     p_rules = sub.add_parser(

@@ -34,6 +34,8 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
+from . import flactools
+
 USER_AGENT = "cdrip/1.0 ( https://github.com/mikebones/cdrip )"
 
 # Vorbis fields salmon actually reads, so these are the names worth writing.
@@ -166,8 +168,9 @@ def release_mbid_from_files(directory: str) -> str | None:
         if not name.lower().endswith(".flac"):
             continue
         proc = subprocess.run(
-            ["metaflac", "--show-tag=MUSICBRAINZ_ALBUMID", os.path.join(directory, name)],
+            [flactools.require("metaflac"), "--show-tag=MUSICBRAINZ_ALBUMID", os.path.join(directory, name)],
             capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         )
         for line in proc.stdout.splitlines():
             if "=" in line:
@@ -205,7 +208,7 @@ def apply(directory: str, meta: Metadata) -> list[str]:
     written: list[str] = []
     for name in flacs:
         path = os.path.join(directory, name)
-        cmd = ["metaflac"]
+        cmd = [flactools.require("metaflac")]
         if meta.genres:
             cmd += ["--remove-tag=%s" % GENRE_FIELD, "--remove-tag=%s" % GENRE_FIELD.lower()]
         if meta.label:
@@ -221,7 +224,8 @@ def apply(directory: str, meta: Metadata) -> list[str]:
         if len(cmd) == 1:
             return written
         cmd.append(path)
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             raise RuntimeError("metaflac failed on %s: %s" % (name, proc.stderr.strip()))
         written.append(name)

@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import subprocess
 
+from . import flactools
+
 # U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN are visually identical to ASCII
 # "-" but break search, sorting and filename round-tripping.  MusicBrainz uses
 # them in titles; fold them.  The ellipsis is left alone - it is a real
@@ -82,10 +84,11 @@ def apply(directory: str, release: dict) -> list[str]:
                 "expected %s for track %d; refusing to tag a partial rip"
                 % (path, number)
             )
-        cmd = ["metaflac", "--remove-all-tags"]
+        cmd = [flactools.require("metaflac"), "--remove-all-tags"]
         cmd += ["--set-tag=%s=%s" % (k, v) for k, v in tags.items() if v]
         cmd.append(path)
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+        encoding="utf-8", errors="replace")
         if proc.returncode != 0:
             raise RuntimeError("metaflac failed on %s: %s" % (path, proc.stderr))
         tagged.append(path)
@@ -100,8 +103,9 @@ def read_back(directory: str) -> dict[str, dict[str, str]]:
             continue
         path = os.path.join(directory, name)
         proc = subprocess.run(
-            ["metaflac", "--export-tags-to=-", path],
+            [flactools.require("metaflac"), "--export-tags-to=-", path],
             capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         )
         tags: dict[str, str] = {}
         for line in proc.stdout.splitlines():

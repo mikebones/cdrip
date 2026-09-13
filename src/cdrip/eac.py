@@ -8,10 +8,19 @@ cambia still fails there, so for those trackers the ripper has to be EAC.
 
 Two useful things follow.
 
-**Validate before uploading.** EAC ships ``CheckLog.exe``, a console tool that
-verifies a log's checksum and prints one of a small set of verdicts. Running it
-locally answers "will this log be accepted?" without spending an upload to find
-out - which is exactly the loop this module was written to end.
+**Validate before uploading**, but not with ``CheckLog.exe``. EAC ships it, and
+it looks like a console validator, but measured on EAC 1.8 it writes nothing to
+stdout or stderr, creates no file, opens no window, and exits 0 for a correctly
+signed log and an unsigned one alike. Treating its silence as "not an EAC log"
+is wrong, and produced a gate here that rejected everything while appearing to
+work. :func:`check_log` now says so rather than inferring a verdict from
+silence.
+
+What *can* be checked locally is the log's own contents - :func:`read_log` and
+:func:`check_settings` - which covers the things that actually decide the
+score: the ripper, the read offset, cache defeat, secure mode, C2, matching
+Test and Copy CRCs, and whether a ``==== Log checksum ====`` line is present at
+all. For the authoritative verdict, run cambia, the parser the tracker uses.
 
 **Driving EAC is a Win32 problem, not a CLI one.** Measured, not assumed:
 
@@ -55,8 +64,9 @@ MENU_COMMANDS = {
     "detect_gaps": 539,                       # F4
 }
 
-# CheckLog.exe's verdicts. It prints one line per log entry, and nothing at all
-# for a file it does not recognise as an EAC log - which is itself the answer.
+# CheckLog.exe's verdict strings, kept for the case where a build of it does
+# behave like a console tool. On EAC 1.8 it never prints any of them - see the
+# module docstring - so absence of these is not a verdict.
 VERDICT_OK = "Log entry is fine!"
 VERDICT_MODIFIED = "Log entry was modified, checksum incorrect!"
 VERDICT_DAMAGED = "Log entry is damaged, can't recover!"
@@ -76,12 +86,22 @@ class LogVerdict:
         )
 
     @property
+    def inconclusive(self) -> bool:
+        """CheckLog said nothing at all, so this proves nothing either way."""
+        return not self.entries
+
+    @property
     def summary(self) -> str:
-        if not self.recognised:
+        if self.inconclusive:
             return (
-                "not an EAC log - CheckLog produced no verdict. A tracker that "
-                "identifies logs by header will reject it as unrecognised, "
-                "however good the rip was."
+                "CheckLog.exe produced no verdict, which is NOT evidence the "
+                "log is bad. Measured on EAC 1.8: it writes nothing to stdout "
+                "or stderr, creates no file, and exits 0 for a correctly "
+                "signed log and an unsigned one alike - so it cannot be used "
+                "as a command-line validator. Judge the log from its own "
+                "contents (see read_log/check_settings) and, for the "
+                "authoritative answer, run cambia - the parser the tracker "
+                "itself uses."
             )
         if self.ok:
             return "EAC log verified: %s" % ", ".join(self.entries)
@@ -101,11 +121,12 @@ def find_checklog(extra: str | None = None) -> str | None:
 
 
 def check_log(log_path: str, checklog: str | None = None) -> LogVerdict:
-    """Run CheckLog.exe over a log and interpret its verdicts.
+    """Run CheckLog.exe over a log and interpret whatever it says.
 
-    Silence is meaningful: CheckLog prints nothing for a file it does not
-    recognise as an EAC log, so an empty result means "not an EAC log" rather
-    than "fine".
+    On EAC 1.8 it says nothing at all, so the usual result is an
+    ``inconclusive`` verdict. That is deliberately not treated as failure:
+    reading silence as "bad log" is what made this gate reject every log,
+    including correctly signed ones, while looking like it worked.
     """
     exe = find_checklog(checklog)
     if not exe:

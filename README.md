@@ -173,8 +173,19 @@ quietly falling back to weaker verification.
 
 ## Rule coverage
 
-The supplied rules live verbatim in [`docs/red-rules.md`](docs/red-rules.md),
-and `cdrip rules` diffs them against the source:
+`cdrip rules` diffs the tracker's uploading rules against the source to show
+which are actually referenced by a check.
+
+The ruleset itself is **not published here** — it is a private tracker's
+members-only wiki, and republishing it verbatim is not ours to do. Put your
+own copy at `docs/red-rules.md` (or pass `--doc`), one rule per `##` heading:
+
+```markdown
+## 2.2.10.9
+Log files must not be edited. …
+```
+
+Against the ruleset this was built from:
 
 ```
 in scope           : 69
