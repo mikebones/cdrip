@@ -45,6 +45,16 @@ WM_SETTEXT = 0x000C
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
 
+BM_GETCHECK = 0x00F0
+BM_CLICK = 0x00F5
+
+# Property-sheet page selection. TCM_SETCURSEL (the tab control's own message)
+# moves the highlight but sends no TCN_SELCHANGE, so the page never actually
+# changes and every tab reads back identically - which looks like the dialog
+# has one page repeated. PSM_SETCURSEL is the property sheet's message, takes
+# an index in wParam, and needs no pointer, so it marshals cross-process.
+PSM_SETCURSEL = 0x0400 + 101
+
 DIALOG_CLASS = "#32770"
 
 # Control ids in EAC 1.8's "CD Information" dialog (Database / Edit CD
@@ -71,6 +81,27 @@ MENU_EDIT_CD_INFO = 518
 MENU_CLEAR_CD_INFO = 524
 MENU_IMPORT_CLIPBOARD = 662
 MENU_EXPORT_CLIPBOARD = 584
+MENU_DRIVE_OPTIONS = 541
+MENU_EAC_OPTIONS = 504
+MENU_COMPRESSION_OPTIONS = 542
+MENU_SAVE_PROFILE = 558
+
+# EAC shows an "Important Information" nag before the options dialogs. It has
+# to be dismissed or the options dialog never appears; unticking 3301 stops it
+# coming back.
+NAG = ("Information", 3311)
+NAG_SHOW_AGAIN = 3301
+
+# Options dialogs, by the substring that identifies their caption. The drive
+# dialog's caption includes the drive model, so it can only be matched loosely.
+DIALOG_DRIVE = "options for drive"
+DIALOG_EAC = "eac options"
+DIALOG_COMPRESSION = "compression options"
+
+# Standard property-sheet buttons.
+BUTTON_OK = 1
+BUTTON_CANCEL = 2
+BUTTON_APPLY = 12321
 # "Split Track Information To Artist/Title". The label reads Artist/Title but
 # the behaviour is the reverse: part 1 stays the title, part 2 becomes the
 # artist. Feeding it "Artist / Title" puts the song name in the artist field.
@@ -186,6 +217,125 @@ def set_text(hwnd: int, value: str) -> None:
     if got != value:
         raise RuntimeError("set_text did not stick: wrote %r, read back %r"
                            % (value, got))
+
+
+def get_check(hwnd: int) -> bool:
+    """Whether a checkbox or radio button is ticked."""
+    ctypes, wintypes, user32 = _win32()
+    return bool(int(user32.SendMessageW(
+        wintypes.HWND(hwnd), BM_GETCHECK, 0, None) or 0))
+
+
+def set_check(hwnd: int, wanted: bool) -> None:
+    """Tick or untick a box, and confirm it took.
+
+    ``BM_SETCHECK`` would change the box's appearance without telling the
+    dialog, so the dialog's own state would never update and OK would write
+    back the old value. ``BM_CLICK`` toggles it *and* sends BN_CLICKED to the
+    parent, which is what the dialog listens for - so this clicks only when
+    the current state is wrong.
+    """
+    ctypes, wintypes, user32 = _win32()
+    if get_check(hwnd) == wanted:
+        return
+    user32.SendMessageW(wintypes.HWND(hwnd), BM_CLICK, 0, None)
+    time.sleep(0.4)
+    if get_check(hwnd) != wanted:
+        raise RuntimeError("checkbox did not move to %r" % wanted)
+
+
+def find_dialog_containing(needle: str, pid: int | None = None) -> int | None:
+    """A visible dialog whose caption contains ``needle`` (case-insensitive).
+
+    Needed because the drive options dialog is captioned with the drive model
+    ("Options for drive SlimtypeDVD A  DS8A5SH "), so it cannot be matched
+    exactly.
+    """
+    lowered = needle.lower()
+    for hwnd in _enum_top(pid):
+        if _class_name(hwnd) != DIALOG_CLASS:
+            continue
+        if lowered in _caption(hwnd).lower():
+            return hwnd
+    return None
+
+
+def dismiss_nag(pid: int | None = None, stop_showing: bool = True) -> bool:
+    """Clear EAC's "Important Information" dialog if it is blocking the way.
+
+    It appears in front of the options dialogs, so an unattended run stalls
+    behind it. Returns whether there was one.
+    """
+    title, ok = NAG
+    dialog = find_dialog(title, pid)
+    if not dialog:
+        return False
+    if stop_showing:
+        box = control(dialog, NAG_SHOW_AGAIN)
+        if box is not None:
+            try:
+                set_check(box, False)
+            except RuntimeError:
+                pass  # Not worth failing the run over the nag's own checkbox.
+    click(dialog, ok, settle=2.0)
+    return True
+
+
+def set_page(dialog: int, index: int, settle: float = 0.8) -> int:
+    """Switch a property sheet to a page and return that page's HWND.
+
+    See :data:`PSM_SETCURSEL` for why the tab control's own message does not
+    work here.
+    """
+    ctypes, wintypes, user32 = _win32()
+    user32.SendMessageW(wintypes.HWND(dialog), PSM_SETCURSEL,
+                        ctypes.c_size_t(index), None)
+    time.sleep(settle)
+    page = visible_page(dialog)
+    if page is None:
+        raise RuntimeError("no visible page after selecting index %d" % index)
+    return page
+
+
+def visible_page(dialog: int) -> int | None:
+    """The property sheet's currently visible page.
+
+    Pages are created lazily and previously visited ones stay around hidden,
+    so enumerating children returns every page that has ever been shown.
+    Filtering on visibility is what picks the current one.
+    """
+    ctypes, wintypes, user32 = _win32()
+    for child in children(dialog):
+        if child.cls != DIALOG_CLASS:
+            continue
+        if user32.IsWindowVisible(wintypes.HWND(child.hwnd)):
+            return child.hwnd
+    return None
+
+
+def open_options(main_hwnd: int, menu_id: int, caption: str,
+                 pid: int | None = None, timeout: float = 20.0) -> int:
+    """Open one of EAC's options dialogs, clearing the nag if it appears."""
+    from . import eacdrive
+
+    existing = find_dialog_containing(caption, pid)
+    if existing:
+        return existing
+
+    eacdrive.post_command(main_hwnd, menu_id)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dismiss_nag(pid)
+        found = find_dialog_containing(caption, pid)
+        if found:
+            return found
+        time.sleep(0.4)
+    raise TimeoutError("options dialog %r did not appear" % caption)
+
+
+def close_dialog(dialog: int, save: bool, settle: float = 2.5) -> None:
+    """OK (writing changes) or Cancel (discarding them)."""
+    click(dialog, BUTTON_OK if save else BUTTON_CANCEL, settle=settle)
 
 
 def find_dialog(title: str, pid: int | None = None) -> int | None:

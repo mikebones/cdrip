@@ -38,6 +38,8 @@ from . import config as config_mod
 from . import drive as drive_mod
 from . import eac as eac_mod
 from . import eacprofile as eacprofile_mod
+from . import eacsettings as eacsettings_mod
+from . import tracker as tracker_mod
 from . import enrich as enrich_mod
 from . import musicbrainz as mb
 from . import rip as rip_mod
@@ -531,6 +533,71 @@ def cmd_eac_settings(args, cfg) -> int:
     return 1 if failed else 0
 
 
+def cmd_eac_configure(args, cfg) -> int:
+    """Check - or fix - the EAC settings a log checker scores.
+
+    A saved profile only exposes the settings EAC stores as strings, so the
+    ones that decide the log score (secure mode, cache defeat, C2, the read
+    offset) can only be read from the live dialogs. Read-only unless --apply
+    is given: silently rewriting someone's EAC options as a side effect of a
+    status check would be a nasty surprise.
+    """
+    from . import eacdrive as eacdrive_mod
+
+    main = eacdrive_mod.find_window()
+    if main is None:
+        _echo("EAC is not running.")
+        return 1
+
+    offset = args.offset
+    if offset is None:
+        _echo("No --offset given, and the read offset is drive-specific: "
+              "using another drive's value produces a rip that looks clean "
+              "but is bit-shifted against every other copy.")
+        return 1
+
+    settings = eacsettings_mod.spec(
+        read_offset=offset,
+        output_dir=args.output_dir,
+        encoder=args.encoder,
+    )
+    result = eacsettings_mod.apply(main, settings, pid=args.pid,
+                                   dry_run=not args.apply)
+
+    _section("EAC settings (%d checked)" % result.checked)
+    for line in result.changed:
+        _echo("  FIXED   %s" % line)
+    for line in result.problems:
+        _echo("  WRONG   %s" % line)
+    for line in result.advisories:
+        _echo("  advice  %s" % line)
+    if not (result.changed or result.problems or result.advisories):
+        _echo("  every setting is already correct")
+    if result.changed:
+        _echo("")
+        _echo("Changes live in memory only. Save a profile "
+              "(EAC / Profiles / Save Profile...) or they are lost on exit.")
+    return 1 if result.problems else 0
+
+
+def cmd_preflight(args, cfg) -> int:
+    """Ask the tracker what is already in a group before uploading into it."""
+    key = args.api_key or os.environ.get("RED_API_KEY")
+    if not key:
+        _echo("No API key. Pass --api-key or set RED_API_KEY.")
+        return 1
+    grp = tracker_mod.group(args.group, key, base=args.base)
+    _section("%s - %s (%d)" % (grp.artist, grp.name, grp.year))
+    for t in grp.torrents:
+        _echo("  %s" % t)
+    _echo("")
+    lines = tracker_mod.preflight(grp, fmt=args.format,
+                                  encoding=args.encoding, media=args.media)
+    for line in lines:
+        _echo("  %s" % line)
+    return 1 if any(l.startswith("DUPLICATE") for l in lines) else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cdrip", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -619,6 +686,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_eac.add_argument("--profile", help="path to a .cfg profile "
                                          "(default: every saved profile)")
     p_eac.set_defaults(func=cmd_eac_settings)
+
+    p_cfgeac = sub.add_parser(
+        "eac-configure",
+        help="check (or --apply) the EAC settings a log checker scores")
+    p_cfgeac.add_argument("--offset", type=int,
+                          help="this drive's AccurateRip read offset")
+    p_cfgeac.add_argument("--output-dir", help="pin EAC's extraction directory")
+    p_cfgeac.add_argument("--encoder", help="path to FLAC.EXE")
+    p_cfgeac.add_argument("--pid", type=int, help="EAC process id")
+    p_cfgeac.add_argument("--apply", action="store_true",
+                          help="write the settings instead of only reporting")
+    p_cfgeac.set_defaults(func=cmd_eac_configure)
+
+    p_pre = sub.add_parser(
+        "preflight",
+        help="check a tracker group for duplicates, tags and edition info")
+    p_pre.add_argument("group", type=int)
+    p_pre.add_argument("--api-key", default=None)
+    p_pre.add_argument("--base", default=tracker_mod.DEFAULT_BASE)
+    p_pre.add_argument("--format", default="FLAC")
+    p_pre.add_argument("--encoding", default="Lossless")
+    p_pre.add_argument("--media", default="CD")
+    p_pre.set_defaults(func=cmd_preflight)
 
     p_fin = sub.add_parser("finish", help="run the salmon stages on an existing rip")
     p_fin.add_argument("path")
