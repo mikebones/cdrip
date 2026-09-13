@@ -205,11 +205,18 @@ deserves.
 
 Listed because a tool that hides its gaps is worse than one that has them.
 
-- **No cue sheet is generated.** RED 2.2.10.7 — a 100% log rip lacking a cue
-  can be trumped by one with even a noncompliant cue. EAC can make one
-  (`Action / Create CUE Sheet / Multiple WAV Files With Corrected Gaps`) after
-  gap detection, but that is not yet wired in.
-- **Gap detection accuracy is not enforced**, which matters once cue sheets are.
+- **Cue sheets are wired up but EAC's gap detection is not reliable.**
+  `eac-rip --cue` runs gap detection and writes a cue (RED 2.2.10.7 — a 100%
+  log rip lacking one can be trumped by a rip with even a noncompliant cue).
+  On a mixed-mode disc, EAC 1.8 has been seen to die inside gap detection with
+  an internal `Gaps.2154 -> INDEX-RANGE` exception, hang on "Track 0", and take
+  the process down. It still leaves a cue behind, and that cue looks right —
+  correct DISCID, titles and performers — while its pregaps are filler: an
+  identical `00:01:00` on several tracks and none on the rest. `cue.check`
+  refuses those, because a missing cue is merely trumpable whereas an invented
+  one is a false statement about the disc.
+- **Gap detection accuracy is not enforced.** It is not scored, but it is
+  implicated in the crash above.
 - **HTOA** (hidden track one audio, 2.2.10.6) is not handled.
 - **`preflight` informs but does not feed the upload.** Release type, tags and
   edition info are still entered by hand — the omission that produced an
