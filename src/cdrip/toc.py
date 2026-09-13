@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 
 # libdiscid's convention for a disc whose last track is data: the lead-out used
@@ -100,12 +101,26 @@ _TRACK_RE = re.compile(
 
 
 def read_toc(device: str = "/dev/cdrom") -> Toc:
-    """Read the audio TOC via ``cd-paranoia -Q``.
+    """Read the audio TOC, however this platform can.
 
-    cd-paranoia reports audio tracks only, which is exactly what we want, and
-    unlike ``cd-info`` it does not stall for minutes doing a full disc-mode
-    analysis on a mixed-mode disc.
+    On Windows there is no cd-paranoia, which used to make the whole disc side
+    of cdrip unusable on the machine that runs EAC. Windows exposes the raw
+    TOC through DeviceIoControl instead, so :mod:`cdrip.wintoc` is used there -
+    no package to install, and it reports the data track and the real lead-out
+    directly rather than leaving them to be inferred.
+
+    Elsewhere this shells out to ``cd-paranoia -Q``, which reports audio tracks
+    only - which is what we want - and unlike ``cd-info`` does not stall for
+    minutes doing a full disc-mode analysis on a mixed-mode disc.
     """
+    if sys.platform == "win32":
+        from . import wintoc
+
+        try:
+            return wintoc.read_toc(device)
+        except wintoc.WinTocError as exc:
+            raise TocReadError(str(exc)) from exc
+
     if not shutil.which("cd-paranoia"):
         raise TocReadError("cd-paranoia not found; install the cdparanoia package")
 
