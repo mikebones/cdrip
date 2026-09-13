@@ -37,6 +37,7 @@ from . import compliance as compliance_mod
 from . import config as config_mod
 from . import drive as drive_mod
 from . import eac as eac_mod
+from . import eacprofile as eacprofile_mod
 from . import enrich as enrich_mod
 from . import musicbrainz as mb
 from . import rip as rip_mod
@@ -497,6 +498,39 @@ def cmd_finish(args, cfg) -> int:
     return _handoff(cfg, args.path, result.log_path, args)
 
 
+def cmd_eac_settings(args, cfg) -> int:
+    """Check EAC's saved option profile before spending a rip on it.
+
+    EAC keeps no readable settings until a profile is saved, and two of its
+    stock values produce a non-compliant release: the filename scheme appends
+    the track artist and omits the ' - ' separator, and FLAC is called at -6.
+    Neither is visible in the audio afterwards and both need a re-rip to fix,
+    so this is a pre-rip gate.
+    """
+    paths = [args.profile] if args.profile else eacprofile_mod.find_profiles()
+    if not paths:
+        _echo("No saved EAC profile found in %s" % eacprofile_mod.DEFAULT_PROFILE_DIR)
+        _echo("EAC stores settings only in memory until you save one "
+              "(EAC / Profiles / Save Profile...), so there is nothing to "
+              "check and nothing that will survive EAC exiting.")
+        return 1
+
+    failed = False
+    for path in paths:
+        _section(os.path.basename(path))
+        profile = eacprofile_mod.read(path)
+        _echo(eacprofile_mod.describe(profile))
+        _echo("")
+        problems = eacprofile_mod.check(profile)
+        for problem in problems:
+            _echo("  PROBLEM %s" % problem)
+        if problems:
+            failed = True
+        else:
+            _echo("  settings are compliant")
+    return 1 if failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cdrip", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -577,6 +611,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_chk = sub.add_parser("check", help="check a finished release against the formatting rules")
     p_chk.add_argument("path")
     p_chk.set_defaults(func=cmd_check)
+
+    p_eac = sub.add_parser(
+        "eac-settings",
+        help="check EAC's saved option profile for settings that would make "
+             "the release non-compliant")
+    p_eac.add_argument("--profile", help="path to a .cfg profile "
+                                         "(default: every saved profile)")
+    p_eac.set_defaults(func=cmd_eac_settings)
 
     p_fin = sub.add_parser("finish", help="run the salmon stages on an existing rip")
     p_fin.add_argument("path")

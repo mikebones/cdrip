@@ -1,0 +1,447 @@
+"""Reading and driving EAC's *dialogs* - the half :mod:`eacdrive` cannot do.
+
+:mod:`eacdrive` walks EAC's ``HMENU``s and posts ``WM_COMMAND``, which starts a
+flow. Most useful entries end in "..." and open a dialog, and a dialog is where
+the actual work happens. Unlike EAC's main window - whose controls are custom
+classes (``myedit``, ``mycombo``, ``mybutton``) and which UI Automation sees as
+56 featureless ``Pane``s - its dialogs are ordinary Win32 ``#32770`` windows
+with real ``Edit`` and ``Button`` children. Those are fully scriptable.
+
+**The trap that cost the most time here: do not read control text with
+``GetWindowText``.** It is documented to return only the *caption* of a window
+owned by another process, and an edit control has no caption - so it returns an
+empty string for a control that is plainly full of text. That silently produced
+"the write failed" for writes that had in fact succeeded, and "the import did
+nothing" for an import that had actually mangled the data in an interesting
+way. ``WM_GETTEXT`` is marshalled across process boundaries by USER32 and
+returns the truth; :func:`get_text` uses it. Verify with the same mechanism you
+wrote with, never with a weaker one.
+
+Two further things measured on EAC 1.8 rather than assumed:
+
+* **Clipboard import is positional and literal.** "Get CD Information From /
+  Clipboard" takes the clipboard's lines, in order, and makes line *i* the
+  title of track *i*. It does not parse a header, a track number, or a
+  duration - feeding it EAC's own *export* format puts the whole line
+  ("``01.<TAB>Title<TAB><TAB>03:48``") into the title. One bare title per line,
+  no header, nothing else. See :func:`titles_to_clipboard`.
+* **Clipboard import does not clear per-track artists.** A disc left over from
+  an earlier attempt keeps "Unknown Artist" on every track, which would go
+  straight into each file's ARTIST tag. "Clear Current CD Information" (the
+  ``Clear`` dialog) does clear them, so clear first and set the album fields
+  again afterwards - the clear takes those with it.
+
+Both import and clear raise a confirmation dialog. :func:`confirm` answers it.
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+from dataclasses import dataclass
+
+WM_COMMAND = 0x0111
+WM_SETTEXT = 0x000C
+WM_GETTEXT = 0x000D
+WM_GETTEXTLENGTH = 0x000E
+
+DIALOG_CLASS = "#32770"
+
+# Control ids in EAC 1.8's "CD Information" dialog (Database / Edit CD
+# Information..., menu id 518). Read out of the running dialog; not a published
+# interface, so verify against your build before trusting them.
+CD_INFO = {
+    "title": 3701,
+    "artist": 3702,
+    "year": 3704,
+    "first_track": 3716,
+    "ok": 3707,
+    "cancel": 3708,
+}
+
+# Fields on the main window, for confirming that a dialog's OK actually landed.
+MAIN_FIELDS = {"title": 992, "artist": 993, "year": 995}
+
+# Confirmations EAC raises, as (window title, button id to accept).
+CONFIRM_IMPORT = ("Warning", 6)   # "All data of the current CD will be deleted!"
+CONFIRM_CLEAR = ("Clear", 5101)   # "All data of the current CD will be overwritten!"
+
+# Menu command ids used here, read from a running EAC 1.8.
+MENU_EDIT_CD_INFO = 518
+MENU_CLEAR_CD_INFO = 524
+MENU_IMPORT_CLIPBOARD = 662
+MENU_EXPORT_CLIPBOARD = 584
+# "Split Track Information To Artist/Title". The label reads Artist/Title but
+# the behaviour is the reverse: part 1 stays the title, part 2 becomes the
+# artist. Feeding it "Artist / Title" puts the song name in the artist field.
+MENU_SPLIT_ARTIST_TITLE = 547
+
+
+def available() -> bool:
+    return sys.platform == "win32"
+
+
+@dataclass(frozen=True)
+class Control:
+    hwnd: int
+    ctl_id: int
+    cls: str
+
+
+def _win32():
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendMessageW.restype = ctypes.c_void_p
+    return ctypes, wintypes, user32
+
+
+def _enum_top(pid: int | None = None) -> list[int]:
+    """Visible top-level windows, optionally limited to one process."""
+    ctypes, wintypes, user32 = _win32()
+    found: list[int] = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, _):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        if pid is not None:
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value != pid:
+                return True
+        found.append(int(hwnd))
+        return True
+
+    user32.EnumWindows(proto(cb), 0)
+    return found
+
+
+def _class_name(hwnd: int) -> str:
+    ctypes, wintypes, user32 = _win32()
+    buf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(wintypes.HWND(hwnd), buf, 256)
+    return buf.value
+
+
+def _caption(hwnd: int) -> str:
+    """A *window's* caption. Correct for top-level windows, useless for controls."""
+    ctypes, wintypes, user32 = _win32()
+    buf = ctypes.create_unicode_buffer(512)
+    user32.GetWindowTextW(wintypes.HWND(hwnd), buf, 512)
+    return buf.value
+
+
+def children(hwnd: int) -> list[Control]:
+    """Every child control of a window, with its control id and class."""
+    ctypes, wintypes, user32 = _win32()
+    out: list[Control] = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(child, _):
+        out.append(Control(
+            hwnd=int(child),
+            ctl_id=int(user32.GetDlgCtrlID(child)),
+            cls=_class_name(int(child)),
+        ))
+        return True
+
+    user32.EnumChildWindows(wintypes.HWND(hwnd), proto(cb), 0)
+    return out
+
+
+def control(parent: int, ctl_id: int) -> int | None:
+    """HWND of the child with this control id, or None."""
+    for c in children(parent):
+        if c.ctl_id == ctl_id:
+            return c.hwnd
+    return None
+
+
+def get_text(hwnd: int) -> str:
+    """Text of a control, read with WM_GETTEXT.
+
+    ``GetWindowText`` cannot do this across a process boundary - it returns
+    captions only, so an edit control reads back as "" no matter what it holds.
+    ``WM_GETTEXT`` is marshalled by USER32 and returns the real contents.
+    """
+    ctypes, wintypes, user32 = _win32()
+    length = user32.SendMessageW(wintypes.HWND(hwnd), WM_GETTEXTLENGTH, 0, None)
+    length = int(length or 0)
+    if length <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.SendMessageW(wintypes.HWND(hwnd), WM_GETTEXT,
+                        ctypes.c_size_t(length + 1), buf)
+    return buf.value
+
+
+def set_text(hwnd: int, value: str) -> None:
+    """Set a control's text, then read it back to prove it landed."""
+    ctypes, wintypes, user32 = _win32()
+    user32.SendMessageW(wintypes.HWND(hwnd), WM_SETTEXT, 0,
+                        ctypes.c_wchar_p(value))
+    got = get_text(hwnd)
+    if got != value:
+        raise RuntimeError("set_text did not stick: wrote %r, read back %r"
+                           % (value, got))
+
+
+def find_dialog(title: str, pid: int | None = None) -> int | None:
+    """A visible ``#32770`` dialog with exactly this caption."""
+    for hwnd in _enum_top(pid):
+        if _class_name(hwnd) == DIALOG_CLASS and _caption(hwnd) == title:
+            return hwnd
+    return None
+
+
+def wait_for_dialog(title: str, pid: int | None = None,
+                    timeout: float = 10.0) -> int:
+    """Block until a dialog appears, or raise."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        hwnd = find_dialog(title, pid)
+        if hwnd:
+            return hwnd
+        time.sleep(0.25)
+    raise TimeoutError("dialog %r did not appear within %.0fs" % (title, timeout))
+
+
+def click(dialog: int, ctl_id: int, settle: float = 1.5) -> None:
+    """Press a button by posting WM_COMMAND, as the dialog's own code expects."""
+    ctypes, wintypes, user32 = _win32()
+    btn = control(dialog, ctl_id) or 0
+    user32.PostMessageW(wintypes.HWND(dialog), WM_COMMAND,
+                        wintypes.WPARAM(ctl_id), wintypes.LPARAM(btn))
+    time.sleep(settle)
+
+
+def confirm(which: tuple[str, int], pid: int | None = None,
+            timeout: float = 10.0) -> bool:
+    """Accept one of EAC's confirmation dialogs if it is up.
+
+    Returns whether there was anything to accept - import and clear both raise
+    one, so silence means the command did not take.
+    """
+    title, ctl_id = which
+    try:
+        dialog = wait_for_dialog(title, pid, timeout)
+    except TimeoutError:
+        return False
+    click(dialog, ctl_id)
+    return True
+
+
+# --- the two operations worth having by name --------------------------------
+
+
+def titles_to_clipboard(titles: dict[int, str]) -> str:
+    """Render track titles in the only shape EAC's clipboard import accepts.
+
+    One bare title per line, ordered by track number, nothing else. A header
+    line becomes track 1's title and shifts everything; a track number or
+    duration ends up *inside* the title.
+    """
+    if not titles:
+        raise ValueError("no titles")
+    ordered = [titles[n] for n in sorted(titles)]
+    if sorted(titles) != list(range(1, len(titles) + 1)):
+        raise ValueError("titles must be a contiguous run starting at track 1, "
+                         "because the import is positional: got %r"
+                         % sorted(titles))
+    return "\r\n".join(ordered) + "\r\n"
+
+
+def set_clipboard(text: str) -> None:
+    """Put text on the clipboard as CF_UNICODETEXT."""
+    ctypes, wintypes, user32 = _win32()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    handle = kernel32.GlobalAlloc(0x0042, len(data))  # GMEM_MOVEABLE|GMEM_ZEROINIT
+    ptr = kernel32.GlobalLock(ctypes.c_void_p(handle))
+    ctypes.memmove(ptr, data, len(data))
+    kernel32.GlobalUnlock(ctypes.c_void_p(handle))
+
+    if not user32.OpenClipboard(None):
+        raise OSError("OpenClipboard failed: %d" % ctypes.get_last_error())
+    try:
+        user32.EmptyClipboard()
+        # 13 = CF_UNICODETEXT. Ownership of the handle passes to the clipboard.
+        if not user32.SetClipboardData(13, ctypes.c_void_p(handle)):
+            raise OSError("SetClipboardData failed: %d" % ctypes.get_last_error())
+    finally:
+        user32.CloseClipboard()
+
+
+def set_cd_info(main_hwnd: int, pid: int | None = None, *,
+                title: str | None = None, artist: str | None = None,
+                year: str | None = None) -> dict[str, str]:
+    """Fill the CD Information dialog and OK it; return the main window's values.
+
+    The return value is read back off the *main* window, not the dialog, so a
+    caller can see that OK actually committed rather than trusting that it did.
+    """
+    from . import eacdrive
+
+    eacdrive.post_command(main_hwnd, MENU_EDIT_CD_INFO)
+    dialog = wait_for_dialog("CD Information", pid)
+
+    for key, value in (("title", title), ("artist", artist), ("year", year)):
+        if value is None:
+            continue
+        hwnd = control(dialog, CD_INFO[key])
+        if hwnd is None:
+            raise RuntimeError("no control %d (%s) in CD Information" % (CD_INFO[key], key))
+        set_text(hwnd, value)
+
+    click(dialog, CD_INFO["ok"], settle=2.0)
+    if find_dialog("CD Information", pid):
+        raise RuntimeError("CD Information dialog did not close after OK")
+
+    return {name: get_text(control(main_hwnd, cid) or 0)
+            for name, cid in MAIN_FIELDS.items()}
+
+
+def import_titles(main_hwnd: int, titles: dict[int, str],
+                  pid: int | None = None, clear_first: bool = True) -> None:
+    """Put track titles into EAC via the clipboard.
+
+    ``clear_first`` wipes stale per-track artists (an aborted earlier attempt
+    leaves "Unknown Artist" on every track, and the import will not remove it).
+    Clearing also drops the album fields, so set those *after* this call.
+    """
+    from . import eacdrive
+
+    if clear_first:
+        eacdrive.post_command(main_hwnd, MENU_CLEAR_CD_INFO)
+        if not confirm(CONFIRM_CLEAR, pid):
+            raise RuntimeError("clear did not raise its confirmation dialog")
+
+    set_clipboard(titles_to_clipboard(titles))
+    eacdrive.post_command(main_hwnd, MENU_IMPORT_CLIPBOARD)
+    if not confirm(CONFIRM_IMPORT, pid):
+        raise RuntimeError("clipboard import did not raise its confirmation dialog")
+
+
+def export_cd_info(main_hwnd: int, pid: int | None = None) -> str:
+    """Ask EAC to write its current CD information to the clipboard, and read it.
+
+    This is the honest way to check what EAC actually holds - it is EAC's own
+    rendering, not an inference from control contents.
+    """
+    from . import eacdrive
+
+    set_clipboard("")
+    eacdrive.post_command(main_hwnd, MENU_EXPORT_CLIPBOARD)
+    time.sleep(2.0)
+    return get_clipboard()
+
+
+def parse_export(text: str) -> dict:
+    """Turn EAC's clipboard export back into structured data.
+
+    The export is the only view of EAC's state that comes from EAC itself, so
+    it is what we verify against. Its one subtlety: a track line is
+    ``NN.<TAB>Artist / Title<TAB><TAB>MM:SS``, but **the artist is omitted when
+    it equals the CD artist**. That is why a stale "Unknown Artist" on every
+    track is invisible while the CD artist is also "Unknown Artist", and pops
+    into view the moment the CD artist is corrected - it was never fixed, only
+    hidden. Tracks are reported here with the artist resolved, so a caller sees
+    the real value either way.
+    """
+    lines = text.splitlines()
+    header = lines[0] if lines else ""
+    artist, _, album = header.partition(" - ")
+    tracks: dict[int, dict[str, str]] = {}
+    for line in lines[1:]:
+        if "\t" not in line:
+            continue
+        number, _, rest = line.partition(".\t")
+        if not number.strip().isdigit():
+            continue
+        parts = [p for p in rest.split("\t") if p]
+        if not parts:
+            continue
+        body, duration = parts[0], (parts[-1] if len(parts) > 1 else "")
+        if " / " in body:
+            track_artist, _, title = body.partition(" / ")
+        else:
+            track_artist, title = artist, body
+        tracks[int(number)] = {
+            "artist": track_artist, "title": title, "duration": duration,
+        }
+    return {"artist": artist, "album": album, "tracks": tracks}
+
+
+def populate_metadata(main_hwnd: int, pid: int | None, *,
+                      artist: str, album: str, year: str,
+                      titles: dict[int, str]) -> dict:
+    """Put a complete, correct tracklist into EAC, and verify it took.
+
+    The order matters and each step exists for a measured reason:
+
+    1. Clear, to drop per-track artists left by any earlier attempt. Nothing
+       else removes them, and they are invisible until the CD artist is right.
+    2. Import ``"Title / Artist"`` per line, then run EAC's split transform.
+       The import only ever sets titles, so this is the one route to per-track
+       artists that does not involve editing the track list by hand.
+    3. Set the album fields, which step 1 also cleared.
+
+    Returns the parsed export, so the caller can see what EAC actually holds
+    rather than what we believe we sent it.
+    """
+    from . import eacdrive
+
+    combined = {n: "%s / %s" % (t, artist) for n, t in titles.items()}
+    import_titles(main_hwnd, combined, pid, clear_first=True)
+
+    eacdrive.post_command(main_hwnd, MENU_SPLIT_ARTIST_TITLE)
+    time.sleep(2.0)
+
+    set_cd_info(main_hwnd, pid, title=album, artist=artist, year=year)
+
+    state = parse_export(export_cd_info(main_hwnd, pid))
+    problems = []
+    if state["artist"] != artist:
+        problems.append("CD artist is %r, expected %r" % (state["artist"], artist))
+    if state["album"] != album:
+        problems.append("CD album is %r, expected %r" % (state["album"], album))
+    for n, want in sorted(titles.items()):
+        got = state["tracks"].get(n)
+        if got is None:
+            problems.append("track %d missing from export" % n)
+        elif got["title"] != want:
+            problems.append("track %d title is %r, expected %r"
+                            % (n, got["title"], want))
+        elif got["artist"] != artist:
+            problems.append("track %d artist is %r, expected %r"
+                            % (n, got["artist"], artist))
+    if problems:
+        raise RuntimeError("EAC metadata is not what we set:\n  "
+                           + "\n  ".join(problems))
+    return state
+
+
+def get_clipboard() -> str:
+    ctypes, wintypes, user32 = _win32()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    user32.GetClipboardData.restype = ctypes.c_void_p
+
+    if not user32.OpenClipboard(None):
+        return ""
+    try:
+        handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
+        if not handle:
+            return ""
+        ptr = kernel32.GlobalLock(ctypes.c_void_p(handle))
+        try:
+            return ctypes.wstring_at(ptr)
+        finally:
+            kernel32.GlobalUnlock(ctypes.c_void_p(handle))
+    finally:
+        user32.CloseClipboard()
