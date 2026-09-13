@@ -3,15 +3,20 @@
 Two entry points, because which ripper you need depends on where the release
 is going.
 
-``adopt`` takes a finished rip - EAC, XLD or whipper - and does everything
-after it: validate the log, check the formatting rules, enrich the metadata,
-detect a lossy master, hand off to smoked-salmon, make the torrent. This is
-the normal path for a tracker that only recognises EAC or XLD logs, because
-EAC cannot be driven from here: its command-line switches open the window and
-idle without ripping, and its window (class ``erstes``) exposes 56 UI
-Automation descendants of which exactly zero support InvokePattern, with no
-MenuBar at all. Its menus *are* real HMENUs, so WM_COMMAND can reach them, but
-the compressed-rip entries open dialogs - so the rip stays a human step.
+Three entry points, because which ripper you need depends on where the release
+is going.
+
+``eac-*`` drives Exact Audio Copy on Windows, which is required for a tracker
+whose checker only recognises EAC or XLD logs. ``eac-load`` puts a verified
+tracklist into EAC, ``eac-configure`` checks the settings a log checker scores,
+and ``eac-rip`` gates on those settings, starts the rip and waits for it.
+
+This used to say EAC could not be automated. That was true of the two obvious
+routes and false overall: the command line accepts ``-DRIVE`` and friends but
+never starts a rip, and UI Automation sees 56 bare ``Pane``s with no
+InvokePattern and no MenuBar. But the menus are real ``HMENU``s and the dialogs
+are ordinary ``#32770`` windows, so the Win32 layer drives the whole flow -
+see :mod:`cdrip.eacwin`.
 
 ``rip`` drives whipper end to end and is still the right tool when the log
 does not have to satisfy a tracker's checker: archiving, or somewhere that
@@ -19,6 +24,11 @@ accepts whipper. It handles the parts only the disc-side can: mixed-mode TOCs
 where the OS shows nothing but a data track, the AccurateRip drive offset,
 whether the drive's cache can be defeated, and a second pass when AccurateRip
 has never seen the disc.
+
+``adopt`` takes a finished rip - EAC, XLD or whipper, made here or by hand -
+and does everything after it: validate the log, check the formatting rules,
+enrich the metadata, detect a lossy master, hand off to smoked-salmon, make
+the torrent.
 
 Either way the rules are the same: never rename after a rip, because the .cue
 and .log reference the filenames; and enrich metadata between the rip and the
