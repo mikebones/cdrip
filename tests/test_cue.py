@@ -122,8 +122,11 @@ def test_cp1252_cue_keeps_its_ellipsis(tmp_path):
 
 
 def test_placeholder_pregaps_are_flagged(tmp_path):
-    """EAC still writes INDEX lines after gap detection crashes; they are
-    uniform filler, not measurements."""
+    """The Corrected-Gaps variant written against append-to-previous files.
+
+    Well-formed, and wrong about the audio: it claims a pregap at the start
+    of each following file, but those files are exact TOC spans.
+    """
     path = tmp_path / "r.cue"
     path.write_text(
         "FILE \"a.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
@@ -133,7 +136,7 @@ def test_placeholder_pregaps_are_flagged(tmp_path):
         "    INDEX 01 00:01:00\n",
         encoding="utf-8", newline="\r\n")
     problems = cue.suspicious_gaps(str(path))
-    assert problems and "never measured" in problems[0]
+    assert problems and "Current Gap Settings" in problems[0]
 
 
 def test_varying_pregaps_are_accepted(tmp_path):

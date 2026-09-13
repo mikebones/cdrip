@@ -6,7 +6,14 @@ a cue is built from the disc's TOC and gap information rather than from the
 extracted audio - so a missing cue never requires re-ripping. Detect gaps,
 write the cue, done.
 
-The catch is the ``FILE`` lines. EAC extracts to WAV and compresses afterwards,
+Two things have to be right. The first is the *variant*: a cue must describe
+the layout the files actually have. EAC's default rip mode appends each gap to
+the previous track, so every file is an exact TOC span - and asking for the
+"Corrected Gaps" cue, which assumes pregaps at the start of the following
+file, yields a well-formed cue that is wrong about the audio. "Current Gap
+Settings" follows the rip and is the safe choice.
+
+The second is the ``FILE`` lines. EAC extracts to WAV and compresses afterwards,
 deleting the WAV, but its "Multiple WAV Files" cue variants name the WAVs it
 extracted. The result references ``01 - Title.wav`` when the directory holds
 ``01 - Title.flac``, and a cue pointing at files that do not exist is worse
@@ -117,14 +124,23 @@ PLACEHOLDER_PREGAP = "00:01:00"
 
 
 def suspicious_gaps(cue_path: str) -> list[str]:
-    """Gap data that looks like a placeholder rather than a measurement.
+    """Gap data that describes a different file layout than the one on disk.
 
-    EAC's gap detection can fail outright - on a mixed-mode disc it has been
-    seen to die with "Gaps.2154 -> INDEX-RANGE" - and a cue written afterwards
-    still contains INDEX lines. They are uniform filler. Shipping them states
-    something about the disc that was never measured, which is worse than
-    shipping no cue at all: 2.2.10.7 makes a missing cue trumpable, while a
-    wrong one is simply wrong.
+    The signature is every pregap being an identical ``00:01:00``. That is
+    what EAC's "Multiple WAV Files With Corrected Gaps" writes when the files
+    were ripped with the default "Append Gaps To Previous Track" instead: the
+    corrected-gaps layout puts each pregap at the *start* of the following
+    file, while append-to-previous leaves every file as an exact TOC span with
+    the pregap at the *end* of the one before.
+
+    The resulting cue is well-formed and wrong about the audio. Measured on
+    one release: the FLACs matched their TOC lengths to the frame, and the
+    track whose cue claimed a 1.00s pregap actually began with 0.5s of
+    silence. The fix is to write the cue with "Current Gap Settings", which
+    follows however the disc was really ripped.
+
+    Worth catching rather than shipping: 2.2.10.7 makes a *missing* cue
+    trumpable, but a cue that misdescribes the audio is simply false.
     """
     text, _ = _decode(cue_path)
 
@@ -145,10 +161,13 @@ def suspicious_gaps(cue_path: str) -> list[str]:
         return []
     if len(set(pregaps)) == 1 and pregaps[0] == PLACEHOLDER_PREGAP:
         return [
-            "every one of the %d pregaps is exactly %s. Real pregaps vary; "
-            "this is what EAC writes when gap detection did not run or "
-            "crashed, so the cue asserts something about the disc that was "
-            "never measured." % (len(pregaps), PLACEHOLDER_PREGAP)
+            "every one of the %d pregaps is exactly %s. Real pregaps vary. "
+            "This is the 'Corrected Gaps' cue variant written against files "
+            "ripped with 'Append Gaps To Previous Track' - it puts each "
+            "pregap at the start of the following file, but those files are "
+            "exact TOC spans with the pregap at the end of the previous one. "
+            "Rewrite the cue with 'Current Gap Settings'."
+            % (len(pregaps), PLACEHOLDER_PREGAP)
         ]
     return []
 

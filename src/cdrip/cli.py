@@ -858,31 +858,39 @@ def _write_cue(main, args, pid) -> int:
     _echo("  RED 2.2.10.7: a 100% log rip with no cue can be trumped by one "
           "with even a noncompliant cue.")
 
+    directory = args.output_dir or "."
     artist = eacwin_mod.get_text(
         eacwin_mod.control(main, eacwin_mod.MAIN_FIELDS["artist"]) or 0)
     album = eacwin_mod.get_text(
         eacwin_mod.control(main, eacwin_mod.MAIN_FIELDS["title"]) or 0)
-    if not (artist and album):
-        _echo("  EAC has no CD artist/title, so there is no name for the cue.")
-        return 1
-    target = os.path.join(args.output_dir or ".",
-                          "%s - %s.cue" % (artist, album))
 
     _echo("  detecting gaps (a separate pass over the disc)")
+    _echo("  this is left to finish - cancelling it once crashed EAC with an")
+    _echo("  internal 'Gaps.2154 -> INDEX-RANGE' exception.")
     eacwin_mod.detect_gaps(main, pid)
-    _echo("  writing %s" % os.path.basename(target))
-    eacwin_mod.create_cue(main, target, pid)
 
+    target = eacwin_mod.create_cue(main, directory, pid)
     if not os.path.isfile(target):
         _echo("  cue was not written")
         return 1
 
+    # Give it the same name as the log, so the folder reads consistently.
+    if artist and album:
+        wanted = os.path.join(directory, "%s - %s.cue" % (artist, album))
+        if os.path.abspath(wanted) != os.path.abspath(target):
+            os.replace(target, wanted)
+            target = wanted
+    _echo("  wrote %s" % os.path.basename(target))
+
     # EAC names the cue's FILE lines after the WAV it extracted, but the WAVs
     # are gone - they were replaced by the compressed files. A cue pointing at
     # files that do not exist is worse than none, so check rather than assume.
-    fixed = cue_mod.retarget(target, os.path.dirname(target))
-    _echo("  %s" % fixed)
-    return 0
+    _echo("  %s" % cue_mod.retarget(target, directory))
+
+    problems = cue_mod.check(target, directory)
+    for problem in problems:
+        _echo("  ! %s" % problem)
+    return 1 if problems else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

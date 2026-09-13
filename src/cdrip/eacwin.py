@@ -546,10 +546,33 @@ def rip_complete(pid: int | None = None) -> bool:
 # Gaps"; it needs gap detection to have run first, which is a separate pass
 # over the disc and takes a few minutes.
 MENU_DETECT_GAPS = 539
+# "Current Gap Settings" writes a cue that matches however the disc was
+# actually ripped, which is the only variant guaranteed to describe the files
+# on disk. The named variants each assume a particular layout, and choosing
+# one that disagrees with the rip produces a cue that is wrong about the audio
+# while looking perfectly well-formed - see the note on gap handling below.
+MENU_CUE_CURRENT_GAPS = 575
 MENU_CUE_CORRECTED_GAPS = 572
 MENU_CUE_LEFTOUT_GAPS = 536
 MENU_CUE_NONCOMPLIANT = 586
 MENU_CUE_SINGLE_WAV = 535
+
+# Gap handling, which the cue must agree with. EAC's default is "Append Gaps
+# To Previous Track": each file is exactly its TOC span, and track N+1's
+# pregap therefore sits at the END of file N. A cue for that layout expresses
+# it as TRACK N+1 / INDEX 00 late inside FILE N, then INDEX 01 00:00:00 at the
+# start of FILE N+1.
+#
+# Asking for "Corrected Gaps" instead describes the opposite layout - pregap
+# at the START of the following file - and EAC will happily write it, giving
+# every gapped track an identical "INDEX 00 00:00:00 / INDEX 01 00:01:00".
+# That looks like measured data and is not: it contradicts files that are
+# exact TOC spans. Verified by measurement - the FLACs matched their TOC
+# lengths to the frame, and track 2 began with 0.5s of silence, not the 1.00s
+# the corrected-gaps cue claimed.
+MENU_GAPS_LEAVE_OUT = 565
+MENU_GAPS_APPEND_PREVIOUS = 477   # EAC's default
+MENU_GAPS_APPEND_NEXT = 564
 
 CUE_DIALOG = "Create CUE Sheet"
 
@@ -600,27 +623,45 @@ def detect_gaps(main_hwnd: int, pid: int | None = None,
     raise TimeoutError("gap detection did not finish within %.0fs" % timeout)
 
 
-def create_cue(main_hwnd: int, path: str, pid: int | None = None,
-               variant: int = MENU_CUE_CORRECTED_GAPS) -> str:
-    """Write a cue sheet, answering the save dialog with ``path``."""
+def create_cue(main_hwnd: int, output_dir: str, pid: int | None = None,
+               variant: int = MENU_CUE_CURRENT_GAPS,
+               timeout: float = 30.0) -> str:
+    """Write a cue sheet and return the path EAC actually wrote.
+
+    EAC does not always ask where to put it. With a fixed extraction directory
+    configured it writes straight there under its own name and shows no
+    dialog at all, so waiting for one times out on a cue that was created
+    successfully. Both routes are handled: answer the dialog if it appears,
+    and otherwise look for a cue that was not there before.
+    """
+    import os
+
     from . import eacdrive
 
+    before = {f for f in os.listdir(output_dir) if f.lower().endswith(".cue")}
     eacdrive.post_command(main_hwnd, variant)
-    dialog = None
-    deadline = time.time() + 20.0
-    while time.time() < deadline and dialog is None:
-        dialog = find_dialog_containing(CUE_DIALOG, pid) or \
-            find_dialog_containing("Save", pid)
-        time.sleep(0.4)
-    if dialog is None:
-        raise TimeoutError("no save dialog appeared for the cue sheet")
 
-    name = control(dialog, 1001)
-    if name is None:
-        raise RuntimeError("save dialog has no filename field")
-    set_text(name, path)
-    click(dialog, BUTTON_OK, settle=3.0)
-    return path
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dialog = (find_dialog_containing(CUE_DIALOG, pid)
+                  or find_dialog_containing("Save", pid))
+        if dialog is not None:
+            name = control(dialog, 1001)
+            if name is None:
+                raise RuntimeError("save dialog has no filename field")
+            target = os.path.join(output_dir, "release.cue")
+            set_text(name, target)
+            click(dialog, BUTTON_OK, settle=3.0)
+            return target
+
+        made = {f for f in os.listdir(output_dir)
+                if f.lower().endswith(".cue")} - before
+        if made:
+            return os.path.join(output_dir, sorted(made)[0])
+        time.sleep(0.5)
+
+    raise TimeoutError(
+        "no cue sheet appeared in %s and no save dialog was shown" % output_dir)
 
 
 def dismiss_rip_dialog(pid: int | None = None) -> bool:

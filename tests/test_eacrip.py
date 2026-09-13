@@ -106,17 +106,19 @@ def test_rip_complete_is_false_with_no_dialog(monkeypatch):
     assert eacwin.rip_complete() is False
 
 
-def test_cue_variants_do_not_default_to_the_noncompliant_one():
-    """EAC labels one variant "(Noncompliant)" in its own menu.
+def test_cue_defaults_to_following_the_rip_not_a_fixed_layout():
+    """The cue must describe the layout the files actually have.
 
-    A rip with no cue at all is trumpable under RED 2.2.10.7, so the cue
-    matters - and picking the wrong variant would produce one that is
-    itself trumpable.
+    "Corrected Gaps" assumes pregaps at the start of the following file.
+    EAC's default rip mode appends them to the previous track instead, so
+    that variant produces a well-formed cue that is wrong about the audio.
+    "Current Gap Settings" follows however the disc was ripped.
     """
     import inspect
     sig = inspect.signature(eacwin.create_cue)
-    assert sig.parameters["variant"].default == eacwin.MENU_CUE_CORRECTED_GAPS
-    assert eacwin.MENU_CUE_CORRECTED_GAPS != eacwin.MENU_CUE_NONCOMPLIANT
+    assert sig.parameters["variant"].default == eacwin.MENU_CUE_CURRENT_GAPS
+    assert eacwin.MENU_CUE_CURRENT_GAPS not in (
+        eacwin.MENU_CUE_NONCOMPLIANT, eacwin.MENU_CUE_CORRECTED_GAPS)
 
 
 def test_detect_gaps_is_required_before_a_cue_is_meaningful():
