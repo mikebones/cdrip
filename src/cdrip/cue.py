@@ -33,15 +33,25 @@ AUDIO_EXTENSIONS = (".flac", ".wav", ".ape", ".wv", ".m4a", ".mp3")
 
 
 def _decode(path: str) -> tuple[str, str]:
-    """Read a cue, returning its text and the encoding it was written in."""
+    """Read a cue, returning its text and the encoding it was written in.
+
+    EAC writes cue sheets in the system codepage, not UTF-8 - on a Western
+    install that is cp1252, where ``0x85`` is U+2026. ``latin-1`` decodes the
+    same byte as a C1 control character, so falling straight back to it turns
+    "Waste… We" into "Waste\\x85 We" and silently corrupts the title on
+    rewrite. cp1252 is tried first for that reason; latin-1 remains the last
+    resort because it cannot fail.
+    """
     with open(path, "rb") as fh:
         raw = fh.read()
     if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return raw.decode("utf-16"), "utf-16"
-    try:
-        return raw.decode("utf-8-sig"), "utf-8-sig"
-    except UnicodeDecodeError:
-        return raw.decode("latin-1"), "latin-1"
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1"), "latin-1"
 
 
 def referenced_files(path: str) -> list[str]:
@@ -98,12 +108,58 @@ def retarget(cue_path: str, directory: str) -> str:
     return "cue written; all %d FILE lines already resolve" % total
 
 
+INDEX_RE = re.compile(r"^\s*INDEX\s+(\d\d)\s+(\d\d:\d\d:\d\d)\s*$", re.M | re.I)
+
+# A pregap EAC emits when gap detection did not actually run. Real pregaps
+# vary track to track; an identical one-second value on several tracks is the
+# placeholder, not a measurement.
+PLACEHOLDER_PREGAP = "00:01:00"
+
+
+def suspicious_gaps(cue_path: str) -> list[str]:
+    """Gap data that looks like a placeholder rather than a measurement.
+
+    EAC's gap detection can fail outright - on a mixed-mode disc it has been
+    seen to die with "Gaps.2154 -> INDEX-RANGE" - and a cue written afterwards
+    still contains INDEX lines. They are uniform filler. Shipping them states
+    something about the disc that was never measured, which is worse than
+    shipping no cue at all: 2.2.10.7 makes a missing cue trumpable, while a
+    wrong one is simply wrong.
+    """
+    text, _ = _decode(cue_path)
+
+    # A pregap is expressed as INDEX 00 (where it starts) followed by INDEX 01
+    # (where the track proper starts), so its LENGTH is the INDEX 01 value -
+    # INDEX 00 is 00:00:00 on every track that has one. Reading INDEX 00 as
+    # the pregap finds nothing, ever.
+    pregaps: list[str] = []
+    pending = False
+    for number, value in INDEX_RE.findall(text):
+        if number == "00":
+            pending = True
+        elif number == "01" and pending:
+            pregaps.append(value)
+            pending = False
+
+    if len(pregaps) < 2:
+        return []
+    if len(set(pregaps)) == 1 and pregaps[0] == PLACEHOLDER_PREGAP:
+        return [
+            "every one of the %d pregaps is exactly %s. Real pregaps vary; "
+            "this is what EAC writes when gap detection did not run or "
+            "crashed, so the cue asserts something about the disc that was "
+            "never measured." % (len(pregaps), PLACEHOLDER_PREGAP)
+        ]
+    return []
+
+
 def check(cue_path: str, directory: str | None = None) -> list[str]:
     """Problems with a cue that would matter to someone using it."""
     problems: list[str] = []
     if not os.path.isfile(cue_path):
         return ["cue sheet %s does not exist" % cue_path]
     directory = directory or os.path.dirname(os.path.abspath(cue_path))
+    problems.extend(suspicious_gaps(cue_path))
 
     files = referenced_files(cue_path)
     if not files:

@@ -109,3 +109,44 @@ def test_no_file_lines_is_reported(tmp_path):
     path = tmp_path / "r.cue"
     path.write_text("REM nothing here\n", encoding="utf-8", newline="\r\n")
     assert any("no FILE lines" in p for p in cue.check(str(path), str(tmp_path)))
+
+
+def test_cp1252_cue_keeps_its_ellipsis(tmp_path):
+    """EAC writes the system codepage. latin-1 decodes 0x85 as a control
+    character, silently corrupting the title on rewrite."""
+    (tmp_path / "03 - Waste\u2026 We.flac").write_bytes(b"x")
+    path = tmp_path / "r.cue"
+    path.write_bytes('FILE "03 - Waste\u2026 We.wav" WAVE\r\n'.encode("cp1252"))
+    cue.retarget(str(path), str(tmp_path))
+    assert cue.referenced_files(str(path)) == ["03 - Waste\u2026 We.flac"]
+
+
+def test_placeholder_pregaps_are_flagged(tmp_path):
+    """EAC still writes INDEX lines after gap detection crashes; they are
+    uniform filler, not measurements."""
+    path = tmp_path / "r.cue"
+    path.write_text(
+        "FILE \"a.wav\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
+        "FILE \"b.wav\" WAVE\n  TRACK 02 AUDIO\n    INDEX 00 00:00:00\n"
+        "    INDEX 01 00:01:00\n"
+        "FILE \"c.wav\" WAVE\n  TRACK 03 AUDIO\n    INDEX 00 00:00:00\n"
+        "    INDEX 01 00:01:00\n",
+        encoding="utf-8", newline="\r\n")
+    problems = cue.suspicious_gaps(str(path))
+    assert problems and "never measured" in problems[0]
+
+
+def test_varying_pregaps_are_accepted(tmp_path):
+    path = tmp_path / "r.cue"
+    path.write_text(
+        "FILE \"b.wav\" WAVE\n    INDEX 00 00:00:00\n    INDEX 01 00:01:37\n"
+        "FILE \"c.wav\" WAVE\n    INDEX 00 00:00:00\n    INDEX 01 00:02:11\n",
+        encoding="utf-8", newline="\r\n")
+    assert cue.suspicious_gaps(str(path)) == []
+
+
+def test_a_cue_with_no_pregaps_is_fine(tmp_path):
+    path = tmp_path / "r.cue"
+    path.write_text("FILE \"a.wav\" WAVE\n    INDEX 01 00:00:00\n",
+                    encoding="utf-8", newline="\r\n")
+    assert cue.suspicious_gaps(str(path)) == []
