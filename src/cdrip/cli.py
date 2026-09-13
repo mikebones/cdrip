@@ -1,8 +1,5 @@
 """cdrip - everything around a CD rip except, usually, the rip itself.
 
-Two entry points, because which ripper you need depends on where the release
-is going.
-
 Three entry points, because which ripper you need depends on where the release
 is going.
 
@@ -763,6 +760,21 @@ def cmd_eac_rip(args, cfg) -> int:
     if not result.problems and not result.changed:
         _echo("  every setting is already correct")
 
+    # Gap detection has to happen BEFORE the rip. The log records gap handling
+    # as it stood when the rip ran, so detecting gaps afterwards - which is
+    # enough to write a correct cue - still leaves the log saying "Gap
+    # handling: Not detected, thus appended to previous track". That is a 10
+    # point deduction, and the only way to fix it is to rip again. Learned the
+    # expensive way: a rip that was otherwise perfect scored 90.
+    if args.cue:
+        _section("Gap detection")
+        _echo("  running before the rip, so the log records the gaps it used")
+        _echo("  (detecting them afterwards still writes a correct cue, but "
+              "leaves the log saying 'Not detected' - a 10 point deduction)")
+        _echo("  this is left to finish; cancelling it once crashed EAC")
+        eacwin_mod.detect_gaps(main, args.pid)
+        _echo("  done")
+
     _section("Ripping")
     if not eacwin_mod.start_rip(main, args.pid):
         _echo("  The rip did not start. Posting the menu command succeeds "
@@ -864,11 +876,8 @@ def _write_cue(main, args, pid) -> int:
     album = eacwin_mod.get_text(
         eacwin_mod.control(main, eacwin_mod.MAIN_FIELDS["title"]) or 0)
 
-    _echo("  detecting gaps (a separate pass over the disc)")
-    _echo("  this is left to finish - cancelling it once crashed EAC with an")
-    _echo("  internal 'Gaps.2154 -> INDEX-RANGE' exception.")
-    eacwin_mod.detect_gaps(main, pid)
-
+    # Gaps were detected before the rip (see cmd_eac_rip); detecting them
+    # again here would be a second pointless pass over the disc.
     target = eacwin_mod.create_cue(main, directory, pid)
     if not os.path.isfile(target):
         _echo("  cue was not written")
