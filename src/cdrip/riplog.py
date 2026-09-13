@@ -104,6 +104,24 @@ def check_log(directory: str) -> list[tuple[str, str, str]]:
     facts = read_log(log)
     out: list[tuple[str, str, str]] = []
 
+    # Gap handling is decided when the rip runs and written into the log then.
+    # Detecting gaps afterwards produces a correct cue and changes nothing in
+    # the log, so this is only fixable by ripping again - which is exactly why
+    # it has to be reported rather than noticed by eye. A release here scored
+    # 90 instead of 100 for this alone.
+    from . import eac as _eac
+
+    eac_facts = _eac.read_log(log)
+    if eac_facts.gaps_detected is False:
+        out.append((
+            "2.2.10.3", "trumpable",
+            "the log says gap handling was %r, a 10 point deduction that "
+            "leaves the rip trumpable by a 100%% log. It is recorded at rip "
+            "time, so detecting gaps now will not fix it - only another rip "
+            "will. Detect gaps BEFORE ripping (cdrip eac-rip --cue does)."
+            % eac_facts.gap_handling,
+        ))
+
     if facts.cdr_detected is True:
         out.append((
             "2.2.10.1", "blocker",

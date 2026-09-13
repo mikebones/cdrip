@@ -848,3 +848,67 @@ def test_a_real_checklog_verdict_is_still_honoured():
     bad = eac.LogVerdict(path="x", recognised=True,
                          entries=(eac.VERDICT_NO_CHECKSUM,))
     assert not bad.ok and not bad.inconclusive
+
+
+# --- gap handling: a 10 point deduction fixable only by re-ripping ----------
+
+_GAP_LOG = """Exact Audio Copy V1.8 from 15. July 2024
+
+Read mode               : Secure
+Defeat audio cache      : Yes
+Read offset correction                      : 6
+Gap handling                                : %s
+
+==== Log checksum 0000000000000000000000000000000000000000000000000000000000000000 ====
+"""
+
+
+def _write_gap_log(tmp_path, gap):
+    p = tmp_path / "rip.log"
+    p.write_text(_GAP_LOG % gap, encoding="utf-8")
+    return str(p)
+
+
+def test_undetected_gaps_are_read_from_the_log(tmp_path):
+    from cdrip import eac
+    facts = eac.read_log(_write_gap_log(tmp_path, "Not detected, thus appended to previous track"))
+    assert facts.gaps_detected is False
+    assert "Not detected" in facts.gap_handling
+
+
+def test_detected_gaps_pass(tmp_path):
+    from cdrip import eac
+    facts = eac.read_log(_write_gap_log(tmp_path, "Appended to previous track"))
+    assert facts.gaps_detected is True
+
+
+def test_a_log_without_gap_handling_is_unknown_not_false(tmp_path):
+    """Absence is not a failure - some log formats omit the line entirely."""
+    from cdrip import eac
+    p = tmp_path / "x.log"
+    p.write_text("Exact Audio Copy V1.8\nRead mode : Secure\n", encoding="utf-8")
+    assert eac.read_log(str(p)).gaps_detected is None
+
+
+def test_check_settings_reports_undetected_gaps(tmp_path):
+    from cdrip import eac
+    facts = eac.read_log(_write_gap_log(tmp_path, "Not detected, thus appended to previous track"))
+    problems = eac.check_settings(facts)
+    assert any("10 point" in p for p in problems)
+    # The important half: it says re-ripping is the only fix.
+    assert any("only ripping again" in p or "only another rip" in p for p in problems)
+
+
+def test_check_settings_silent_when_gaps_were_detected(tmp_path):
+    from cdrip import eac
+    facts = eac.read_log(_write_gap_log(tmp_path, "Appended to previous track"))
+    assert not any("gap" in p.lower() for p in eac.check_settings(facts))
+
+
+def test_riplog_check_reports_undetected_gaps(tmp_path):
+    from cdrip import riplog
+    _write_gap_log(tmp_path, "Not detected, thus appended to previous track")
+    findings = riplog.check_log(str(tmp_path))
+    gap = [f for f in findings if "gap handling" in f[2].lower()]
+    assert gap, "cdrip check must surface this, not just adopt"
+    assert gap[0][1] == "trumpable"

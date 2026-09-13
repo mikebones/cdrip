@@ -159,6 +159,10 @@ _C2_RE = re.compile(r"Make use of C2 pointers\s*:\s*(\w+)", re.I)
 _MODE_RE = re.compile(r"Read mode\s*:\s*(\w+)", re.I)
 _ACCURATE_RE = re.compile(r"Utilize accurate stream\s*:\s*(\w+)", re.I)
 _CHECKSUM_RE = re.compile(r"^==== Log checksum ([0-9A-Fa-f]{64}) ====", re.M)
+# "Gap handling : Not detected, thus appended to previous track" is a 10 point
+# deduction, and it is recorded at RIP time - so it cannot be fixed afterwards
+# by detecting gaps and writing a cue. Only another rip fixes it.
+_GAP_RE = re.compile(r"Gap handling\s*:\s*(.+?)\s*$", re.M | re.I)
 _TESTCOPY_RE = re.compile(r"Test CRC\s+([0-9A-Fa-f]{8}).*?Copy CRC\s+([0-9A-Fa-f]{8})", re.S | re.I)
 
 
@@ -171,7 +175,19 @@ class EacLogFacts:
     c2_pointers: bool | None
     read_mode: str | None
     has_checksum: bool
+    gap_handling: str | None
     test_copy_pairs: tuple[tuple[str, str], ...]
+
+    @property
+    def gaps_detected(self) -> bool | None:
+        """Whether EAC actually detected the gaps during this rip.
+
+        None when the log does not mention gap handling at all (not an EAC
+        log, or a format that omits it).
+        """
+        if self.gap_handling is None:
+            return None
+        return "not detected" not in self.gap_handling.lower()
 
     @property
     def crcs_match(self) -> bool:
@@ -205,6 +221,7 @@ def read_log(path: str) -> EacLogFacts:
         c2_pointers=_yesno(_C2_RE.search(text).group(1) if _C2_RE.search(text) else None),
         read_mode=(_MODE_RE.search(text).group(1) if _MODE_RE.search(text) else None),
         has_checksum=bool(_CHECKSUM_RE.search(text)),
+        gap_handling=(_GAP_RE.search(text).group(1) if _GAP_RE.search(text) else None),
         test_copy_pairs=tuple(_TESTCOPY_RE.findall(text)),
     )
 
@@ -237,4 +254,12 @@ def check_settings(facts: EacLogFacts, expected_offset: int | None = None) -> li
         )
     if facts.test_copy_pairs and not facts.crcs_match:
         problems.append("Test and Copy CRCs differ - the read is not reproducible.")
+    if facts.gaps_detected is False:
+        problems.append(
+            "gap handling is %r - a 10 point log deduction. This is recorded "
+            "when the rip runs, so detecting gaps afterwards (which is enough "
+            "for a correct cue) does NOT fix it; only ripping again does. Run "
+            "'Detect Gaps' BEFORE the rip - cdrip eac-rip --cue does."
+            % facts.gap_handling
+        )
     return problems
