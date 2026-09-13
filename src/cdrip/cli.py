@@ -598,6 +598,99 @@ def cmd_preflight(args, cfg) -> int:
     return 1 if any(l.startswith("DUPLICATE") for l in lines) else 0
 
 
+def _tracklist(release: dict) -> tuple[str, str, str, dict]:
+    """Pull artist, album, year and numbered titles out of a MusicBrainz release."""
+    artist = ", ".join(
+        a["artist"]["name"] for a in release.get("artist-credit", []) if "artist" in a
+    )
+    album = release.get("title", "")
+    year = (release.get("date") or "")[:4]
+    titles: dict[int, str] = {}
+    for medium in release.get("media") or []:
+        for track in medium.get("tracks") or []:
+            titles[int(track["position"])] = track.get("title", "")
+    return artist, album, year, titles
+
+
+def cmd_eac_load(args, cfg) -> int:
+    """Put a verified MusicBrainz tracklist into a running EAC.
+
+    EAC's own metadata routes do not cover this disc: the CTDB provider
+    returns nothing for it, and the clipboard import is positional and sets
+    titles only. So the tracklist comes from MusicBrainz, goes through the
+    same pre-rip naming gate that whipper rips use, and is written into EAC
+    only if it passes - because once the rip exists the log and cue reference
+    the filenames, and renaming invalidates both.
+    """
+    from . import eacdrive as eacdrive_mod
+    from . import eacwin as eacwin_mod
+
+    if args.release:
+        release = mb.get_release(args.release)
+    else:
+        if not (args.artist and args.album):
+            _echo("Need --release <mbid>, or --artist and --album.")
+            return 2
+        candidates = mb.search_releases(args.artist, args.album)
+        if not candidates:
+            _echo("Nothing matched.")
+            return 1
+        if len(candidates) > 1 and not args.yes:
+            _section("Candidates")
+            for c in candidates[:10]:
+                media = ", ".join(
+                    m.get("format") or "?" for m in c.get("media") or []
+                )
+                _echo("  %s  %s  %s  [%s]" % (
+                    c["id"], (c.get("date") or "????")[:4], c.get("title"), media))
+            _echo("")
+            _echo("More than one release matched; re-run with --release <mbid>.")
+            return 1
+        release = mb.get_release(candidates[0]["id"])
+
+    artist, album, year, titles = _tracklist(release)
+    _section("MusicBrainz")
+    _echo("  %s - %s (%s)" % (artist, album, year))
+    for n, t in sorted(titles.items()):
+        _echo("    %02d  %s" % (n, t))
+
+    _section("Pre-rip naming check")
+    findings = compliance_mod.check_metadata(titles, album=album, artist=artist)
+    for f in findings:
+        _echo("  %s" % f)
+    blocking = [f for f in findings if f.severity != compliance_mod.SEVERITY_INFO]
+    if blocking and not args.ignore_naming:
+        _echo("")
+        _echo("Refusing to load. Fix these in MusicBrainz first - after the rip "
+              "the .cue and .log reference the filenames and renaming "
+              "invalidates both. Override with --ignore-naming.")
+        return 1
+    if not findings:
+        _echo("  no findings")
+
+    if args.dry_run:
+        _echo("")
+        _echo("Dry run; EAC not touched.")
+        return 0
+
+    main = eacdrive_mod.find_window()
+    if main is None:
+        _echo("")
+        _echo("EAC is not running.")
+        return 1
+    state = eacwin_mod.populate_metadata(
+        main, args.pid, artist=artist, album=album, year=year, titles=titles)
+
+    _section("Verified against EAC's own export")
+    _echo("  %s - %s" % (state["artist"], state["album"]))
+    for n, t in sorted(state["tracks"].items()):
+        _echo("    %02d  %-55s %s" % (n, t["title"], t["duration"]))
+    _echo("")
+    _echo("Tracks beyond the audio programme (a data track) are left alone; "
+          "EAC excludes them from extraction itself.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cdrip", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -698,6 +791,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfgeac.add_argument("--apply", action="store_true",
                           help="write the settings instead of only reporting")
     p_cfgeac.set_defaults(func=cmd_eac_configure)
+
+    p_load = sub.add_parser(
+        "eac-load",
+        help="put a verified MusicBrainz tracklist into a running EAC")
+    p_load.add_argument("--release", help="MusicBrainz release MBID")
+    p_load.add_argument("--artist")
+    p_load.add_argument("--album")
+    p_load.add_argument("--yes", action="store_true",
+                        help="take the first search result without asking")
+    p_load.add_argument("--pid", type=int, help="EAC process id")
+    p_load.add_argument("--dry-run", action="store_true",
+                        help="show the tracklist and the check, touch nothing")
+    p_load.add_argument("--ignore-naming", action="store_true",
+                        help="load even when the titles have naming findings")
+    p_load.set_defaults(func=cmd_eac_load)
 
     p_pre = sub.add_parser(
         "preflight",

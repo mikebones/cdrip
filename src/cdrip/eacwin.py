@@ -491,6 +491,65 @@ def export_cd_info(main_hwnd: int, pid: int | None = None) -> str:
     return get_clipboard()
 
 
+# EAC's extraction progress window. Its caption is stable across the test and
+# copy passes, so its presence is the signal that a rip is under way.
+RIP_DIALOG = "Extracting"
+
+
+def rip_in_progress(pid: int | None = None) -> bool:
+    """Whether EAC is currently extracting.
+
+    Note what this deliberately does *not* use: a process's I/O counters. CD
+    reads go out through SCSI passthrough and do not increment
+    ``ReadOperationCount``, so a perfectly healthy rip shows a zero read delta
+    and near-idle CPU. Concluding "nothing is happening" from that is wrong,
+    and was wrong here. The progress window is the honest signal.
+    """
+    return find_dialog_containing(RIP_DIALOG, pid) is not None
+
+
+def wait_for_rip(pid: int | None = None, timeout: float = 7200.0,
+                 poll: float = 15.0, on_tick=None) -> bool:
+    """Block until EAC's extraction window closes.
+
+    Returns True if the rip finished, False if it never started - which is a
+    real case worth distinguishing, because posting the menu command succeeds
+    whether or not a rip actually begins.
+    """
+    deadline = time.time() + timeout
+    started = False
+    while time.time() < deadline:
+        running = rip_in_progress(pid)
+        if running:
+            started = True
+        elif started:
+            return True
+        if on_tick is not None:
+            on_tick(running)
+        time.sleep(poll)
+    if not started:
+        return False
+    raise TimeoutError("rip did not finish within %.0fs" % timeout)
+
+
+def start_rip(main_hwnd: int, pid: int | None = None,
+              settle: float = 5.0) -> bool:
+    """Trigger 'Test & Copy Selected Tracks -> Compressed' and confirm it began.
+
+    The menu entry is found by walking the menu rather than by its id, and its
+    leaf label is matched exactly: "Uncompressed..." contains "compressed", so
+    a substring match silently rips to WAV instead of FLAC.
+    """
+    from . import eacdrive
+
+    entry = eacdrive.find_rip_command(eacdrive.read_menu(main_hwnd))
+    if entry is None:
+        raise RuntimeError("could not find the compressed test-and-copy entry")
+    eacdrive.post_command(main_hwnd, entry.command_id)
+    time.sleep(settle)
+    return rip_in_progress(pid)
+
+
 def parse_export(text: str) -> dict:
     """Turn EAC's clipboard export back into structured data.
 
