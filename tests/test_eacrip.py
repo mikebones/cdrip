@@ -104,3 +104,21 @@ def test_wait_returns_as_soon_as_the_button_says_ok(monkeypatch):
 def test_rip_complete_is_false_with_no_dialog(monkeypatch):
     monkeypatch.setattr(eacwin, "find_dialog_containing", lambda n, pid=None: None)
     assert eacwin.rip_complete() is False
+
+
+def test_cue_variants_do_not_default_to_the_noncompliant_one():
+    """EAC labels one variant "(Noncompliant)" in its own menu.
+
+    A rip with no cue at all is trumpable under RED 2.2.10.7, so the cue
+    matters - and picking the wrong variant would produce one that is
+    itself trumpable.
+    """
+    import inspect
+    sig = inspect.signature(eacwin.create_cue)
+    assert sig.parameters["variant"].default == eacwin.MENU_CUE_CORRECTED_GAPS
+    assert eacwin.MENU_CUE_CORRECTED_GAPS != eacwin.MENU_CUE_NONCOMPLIANT
+
+
+def test_detect_gaps_is_required_before_a_cue_is_meaningful():
+    doc = eacwin.detect_gaps.__doc__ or ""
+    assert "cue" in doc.lower()

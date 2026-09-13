@@ -1,383 +1,264 @@
 # cdrip
 
-Rip an audio CD to verified FLAC, then hand it to
-[smoked-salmon](https://github.com/smokin-salmon/smoked-salmon).
+Everything around ripping a CD to FLAC for a Gazelle-style tracker: driving
+Exact Audio Copy, verifying the rip, checking the rules, and handing off to
+[smoked-salmon](https://github.com/ligh7s/smoked-salmon) for the upload.
 
-`cdrip` does the parts salmon does not: the optical drive, disc IDs, log
-validation and metadata enrichment. Everything salmon already owns — FLAC
-integrity, upconversion and MQA detection, spectrals, torrent creation,
-lossy-master measurement — is called rather than re-implemented.
+It exists because the interesting failures are not in the ripping. A rip can be
+bit-perfect, confirmed by AccurateRip, and still be rejected or marked
+trumpable for reasons invisible in the audio: an unsigned log, a filename
+scheme that drops a separator, a missing cue sheet, a tag nobody looked at.
+Each of those cost a deleted torrent before it was understood. This encodes
+what was learned so it does not have to be learned twice.
 
-Two entry points:
+Nothing here is clever. It is a list of things that turned out to matter, with
+the reason attached to each one.
 
-* **`cdrip adopt <path>`** — take a finished rip (EAC, XLD or whipper) and do
-  everything after it. This is the normal path for a tracker that only
-  recognises EAC or XLD logs.
-* **`cdrip rip`** — drive whipper end to end. Right when the log does not have
-  to satisfy a tracker's log checker.
+---
 
-## Why `adopt` exists: EAC cannot be automated from here
+## What it does
 
-Measured, not assumed:
+```
+                 cdrip eac-load      MusicBrainz -> naming gate -> EAC
+                        |
+                 cdrip eac-rip       settings gate -> rip -> wait
+                        |
+                 cdrip adopt         log check -> rules -> tags -> salmon
+                        |
+                 cdrip preflight     dupes, release type, tags, edition
+```
 
-* `EAC.exe` accepts `-DRIVE`, `-OUTPUTDIRECTORY`, `-TESTANDCOPY`, `-CLOSE`,
-  but they **do not start a rip**. Launched with all of them it opens its
-  window and idles — flat CPU, zero output files after 45 seconds. EAC's own
-  documentation only ever describes the crash-workaround switches
-  (`-nocdtext`, `-notestunit`, …), which is consistent.
-* **UI Automation can see EAC but not drive it.** Its window (class `erstes`)
-  exposes 56 descendants, every one a bare `Pane`, **none** supporting
-  InvokePattern, and no MenuBar. pywinauto's UIA backend is useless here.
-* Its menus **are** real `HMENU`s, so `WM_COMMAND` reaches them —
-  `Action → Test & Copy Selected Tracks → Compressed` is command id **771**.
-  But that entry opens a dialog, so posting the command is necessary and not
-  sufficient.
+`adopt` also accepts a rip you made by hand, from EAC, XLD or whipper.
 
-So the rip is a human step, and `cdrip adopt` picks up immediately afterwards.
-Nothing else about the pipeline changes.
+## Quick start
 
-## Log formats decide which ripper you need
+Ripping a disc on Windows with EAC running:
 
-Some trackers identify a log purely by its header — RED accepts **"Exact Audio
-Copy"** or **"X Lossless Decoder"** and rejects everything else outright as
-*"Unrecognized log file!"*, scoring it `-1` and marking the torrent trumpable
-for "Bad/No Checksum(s)". That is not a judgement on the rip: the same whipper
-log reads as `Whipper`, `Integrity.Match`, score 100 in cambia, and its own
-SHA-256 verifies.
+```bash
+cdrip eac-load  --artist "A Thousand Times Repent" --album "Virtue Has Few Friends"
+cdrip eac-rip   --offset 6 --output-dir 'C:\rips' --apply-settings
+cdrip preflight 377594
+cdrip adopt     'C:\rips' --tracks 6 --expect-offset 6 \
+                --label "Tribunal Records" --catalogue "TRB092"
+```
 
-`cdrip adopt` runs EAC's bundled **`CheckLog.exe`** over the log *before*
-anything is uploaded, so an unacceptable log is caught locally instead of by
-deleting a torrent. Note that CheckLog prints **nothing** for a file it does
-not recognise — silence means "not an EAC log", never "fine", and `cdrip`
-treats it that way.
+`--offset` is your drive's AccurateRip read offset. There is deliberately no
+default: another drive's value produces a rip that looks perfectly clean and is
+bit-shifted against every other copy of the disc. `cdrip info` will look it up.
 
-## Why this exists
+## Commands
 
-Three things kept going wrong by hand:
-
-**Mixed-mode discs hide their music.** A CD with audio tracks followed by a
-data track shows up in Windows Explorer (and a naive `mount`) as a disc full
-of files. The audio programme is invisible. `cdrip` reads the real TOC, so a
-disc that looks like a CD-ROM of MP3s is correctly identified as six Red Book
-tracks plus a data session.
-
-**Unknown disc IDs produce untagged rips.** whipper matches on disc ID *only*
-— passing `--release` just disambiguates among disc-ID hits, so it does not
-help when MusicBrainz has never seen the disc. That is the normal case for
-promos and small-label pressings. `cdrip submit-discid` attaches the disc ID
-to the right release, verifying track lengths against the TOC first, so future
-rips tag themselves.
-
-**Not every disc is in AccurateRip.** Two different things get called
-"verified", and it is worth keeping them apart:
-
-* whipper already does **test-and-copy per track** — each track is read twice
-  and both CRCs go in the log. Equal CRCs mean the read is *repeatable* on this
-  drive, with this disc, in this session.
-* **AccurateRip** means the read is *correct* — it agrees with other people's
-  rips, on other drives. A consistent offset error, or a drive that mis-reads
-  the same sector identically twice, sails through test-and-copy.
-
-With no AccurateRip entry there is nothing to agree with. `cdrip` then rips the
-whole disc a second time and compares each track's decoded-audio MD5. A full
-second pass adds a fresh TOC read, spin-up and seek pattern, so it catches
-session-level problems a per-track re-read inside one pass can miss. It is
-weaker than AccurateRip and stronger than nothing — a cross-check, not the
-primary evidence, when the log already shows Test CRC == Copy CRC throughout.
-
-The comparison uses the FLAC-stored MD5 of the decoded audio, so tags do not
-affect it: an untagged pass and a tagged pass of the same disc compare equal.
+| Command | What it does |
+| --- | --- |
+| `info` | TOC, disc ID, drive offset, MusicBrainz status |
+| `submit-discid` | Attach this disc's ID to a MusicBrainz release |
+| `eac-load` | Put a verified MusicBrainz tracklist into a running EAC |
+| `eac-configure` | Check — or `--apply` — the EAC settings a log checker scores |
+| `eac-settings` | Check EAC's saved option profile |
+| `eac-rip` | Settings gate, start the test-and-copy rip, wait for it |
+| `adopt` | Take a finished rip and run everything after it |
+| `check` | Check a finished folder against the formatting rules |
+| `preflight` | Ask the tracker what is already in a group |
+| `rules` | Which tracker rules the code references, and which it does not |
+| `rip` | Drive whipper end to end (see *Which ripper* below) |
+| `finish` | Run the salmon stages on an existing rip |
 
 ## Install
 
-```sh
-apt install whipper flac sox cd-paranoia libcdio-utils cdrdao python3-libdiscid
-pip install -e .
+```bash
+git clone https://github.com/mikebones/cdrip
+cd cdrip && pip install -e .
 ```
 
-## Use
+Python 3.11+, no required dependencies. Optional, depending on what you use:
+EAC (Windows, for tracker-grade logs), `flac`/`metaflac`, `sox` for lossy-master
+detection, whipper and `cd-paranoia` for the non-Windows rip path.
 
-```sh
-cdrip info                    # TOC, disc ID, drive offset, MusicBrainz status
-cdrip submit-discid --artist "..." --album "..."
-cdrip rip --name "Artist - Album (2007) [CD FLAC]"
-cdrip check /path/to/release          # formatting rules + rip-log facts
-cdrip finish /path/to/existing/rip    # just the salmon stages
-```
+---
 
-## What a rip actually does
+## Which ripper, and why it matters
 
-1. **Read the TOC** (`cd-paranoia -Q`) — audio tracks only, and fast. `cd-info`
-   is used just to locate a trailing data track; it is avoided otherwise
-   because its full disc-mode analysis stalls for minutes on mixed-mode discs.
-2. **Compute the disc ID** via libdiscid, including the mixed-mode rule that
-   the lead-out is the data track's start minus 11400 frames.
-3. **Look up MusicBrainz.** Known disc ID → whipper tags during the rip.
-   Unknown → optionally tag afterwards from a `--release` whose track lengths
-   are verified against the TOC.
-4. **Resolve the read offset** from AccurateRip's public drive database,
-   preferring the row with the most submissions.
-5. **Check the drive cache** via `whipper drive analyze`. If the cache cannot
-   be defeated, re-reads are not independent and the rip cannot be verified;
-   `cdrip` refuses without `--force`.
-6. **Rip** with whipper, twice when the disc is not AccurateRip-verifiable, and
-   compare decoded-audio MD5s track by track.
+**RED rejects whipper logs outright.** Its checker identifies a log by its
+header; anything it does not recognise scores −1 and is marked trumpable for
+"Bad/No Checksum(s)" regardless of how good the rip was. A whipper rip scoring
+100 in cambia still fails there, and `whipper-plugin-eaclogger`'s checksum is
+explicitly not EAC-compatible — its own source says so.
 
-   whipper **ejects the disc when a rip finishes**, so the second pass starts on
-   an empty drive. Left alone it fails as a bare `FileNotFoundError` from
-   cdrdao's TOC reader, which says nothing about the real cause. `cdrip` detects
-   the empty drive, tries `eject -t`, and — many slim USB and slot-loading
-   drives cannot close their own tray — otherwise asks and waits.
-7. **Tag in place** — never rename. whipper's `.cue` and `.log` reference the
-   audio filenames, and renaming afterwards silently invalidates both, which a
-   tracker's log checker will reject. If you want proper filenames, attach the
-   disc ID to MusicBrainz and re-rip so whipper gets it right at source.
-8. **Enrich the metadata** — see below. This is the only stage that adds
-   label, catalogue number and genre, and it has to sit here.
-9. **Hand to salmon** for checks, spectrals and the torrent.
-10. **Check for a lossy master** — see below.
+So for those trackers the ripper has to be EAC, and `eac-*` drives it. `rip`
+(whipper) is still the right tool where the log does not have to satisfy a
+checker: archiving, or a tracker that accepts it.
+
+## Driving EAC
+
+EAC has no usable automation surface, which is worth stating precisely because
+two plausible approaches waste a day:
+
+- **The command line does not rip.** `EAC.exe` accepts `-DRIVE`,
+  `-OUTPUTDIRECTORY`, `-TESTANDCOPY`, `-CLOSE` and more. Launched with all of
+  them it opens its window and idles — flat CPU, no output after 45 seconds.
+  Its documentation only ever describes the crash-workaround switches.
+- **UI Automation can see EAC but not touch it.** Its window (class `erstes`)
+  exposes 56 descendants, every one a bare `Pane`, none supporting
+  InvokePattern, and no MenuBar at all. pywinauto's UIA backend is useless here.
+- **Win32 works.** The menus are real `HMENU`s, so they can be walked and
+  triggered with `WM_COMMAND`, and the dialogs are ordinary `#32770` windows
+  with real controls.
+
+Four things about that layer are not guessable, and each produced a wrong
+conclusion before it was understood:
+
+- **`GetWindowText` cannot read a control owned by another process.** It
+  returns window captions only, and an edit control has none — so it returns
+  `''` for a control plainly full of text. This made successful writes look
+  failed and a mangled import look like a no-op. `WM_GETTEXT` is marshalled
+  across processes and tells the truth. *Verify with the same mechanism you
+  wrote with, never a weaker one.*
+- **`TCM_SETCURSEL` does not change a property-sheet page.** It moves the tab
+  highlight without sending `TCN_SELCHANGE`, so every tab reads back identical
+  and the dialog looks like it has one page repeated. `PSM_SETCURSEL` works.
+- **`BM_SETCHECK` does not tell the dialog.** The box changes, the dialog's own
+  state does not, and OK writes back the old value. `BM_CLICK` does both.
+- **CD reads do not move a process's I/O counters.** They go through SCSI
+  passthrough, so a healthy rip shows a zero read delta and near-idle CPU.
+  "Nothing is happening" is the wrong conclusion; watch the progress window.
+
+EAC also keeps **no readable configuration anywhere** until a profile is saved
+— no INI, nothing under `HKCU\Software` — so a carefully configured EAC loses
+everything on exit. `eac-configure` reads the live dialogs; `eac-settings`
+reads a saved `.cfg`.
+
+## The settings that decide a log's score
+
+`eac-configure` enforces these, each carrying its reason in the source. Three
+are easy to get backwards or miss entirely:
+
+- **`Append checksum to status report`** is **off by default** and sits on a
+  tab that is easy to miss. Without it EAC writes no `==== Log checksum ====`
+  line, the log cannot be verified, and the torrent is trumpable for "Bad/No
+  Checksum(s)" however good the rip was. This single unticked box is what made
+  an otherwise flawless rip — all tracks at AccurateRip confidence 2, CTDB
+  confirmed, 100% quality, no errors — fail.
+- **`Drive caches audio data`** is a statement *about the drive*, not a
+  request. Ticking it is what makes EAC defeat the cache.
+- **`Delete leading and trailing silent blocks`** must stay **off**. It alters
+  the audio, so the rip stops matching AccurateRip and everyone else's copy.
+
+The read offset is checked only when you supply it, and the rest are checked
+regardless — an unknown offset must not switch the whole gate off.
 
 ## Lossless rip vs lossy master
 
-These are different questions and a release can fail the second while passing
-the first:
+A CD can be pressed from a lossy source. The rip is then perfectly lossless and
+the *master* is not, which trackers require you to report (RED 2.1.2.2).
 
-* the **rip** is lossless when the FLAC is a bit-exact copy of the disc's PCM
-  (whipper's Test/Copy CRCs, salmon's CRC-vs-log check);
-* the **master** is lossy when whoever made the disc encoded to MP3 or AAC
-  somewhere upstream. A perfect rip of that disc is still a perfect rip, and
-  the audio is still already degraded.
-
-Nothing in the rip chain catches the second case, and salmon does not either —
-`specs --no-upload` generates images for a human and answers "not lossy
-mastered" non-interactively. Eyeballing the spectrogram is unreliable too: a
-natural rolloff and a codec lowpass look alike at a glance, and transient
-smearing can suggest content above the cutoff that is not really there.
-
-So measure it instead, requiring two signatures together:
-
-1. a **cliff** — the level falls 15 dB or more across the kHz leading up to the
-   cutoff, where a natural master rolls off at 1–2 dB per kHz; and
-2. a **flat floor** above it — successive bands at the same level, meaning
-   what remains is dither noise, not signal.
-
-Either alone is weak; a quiet track can look cliff-like and a dull master can
-sit near the floor. The floor is measured per track rather than assumed, since
-it moves with bit depth and level, and a track too quiet to measure is reported
-as indeterminate rather than guessed at. A release is called lossy only when a
-majority of measurable tracks agree.
-
-The measurement itself lives in smoked-salmon as `salmon check lossy`
-(`--json` for machine callers); `cdrip` invokes it rather than keeping a second
-copy, so anything else driving salmon reaches the same verdict.
-
-## Formatting rules, and when they can be fixed
-
-`cdrip` checks the tracker formatting rules that are mechanically checkable.
-The rule numbers are RED's, but the substance is ordinary hygiene most Gazelle
-trackers share. What matters more than the list is *when* each one can be
-fixed:
-
-**Before the rip.** Anything that ends up in a filename. whipper builds
-filenames from MusicBrainz and writes a `.cue` and `.log` that reference them,
-and editing a rip log is forbidden (2.2.10.9) — so renaming afterwards silently
-invalidates both. The only clean fix is to correct MusicBrainz and rip again,
-which costs ten seconds if you catch it up front and fifteen minutes if you
-don't. So `cdrip rip` checks the MusicBrainz titles it is about to use and
-stops before touching the drive (`--ignore-naming` to override):
-
-- **2.3.11.1** lookalike characters — U+2010 HYPHEN, non-breaking hyphen,
-  Cyrillic а/е/о/р/с/х and Greek Α/Ο passing as Latin. These are visually
-  identical to ASCII and break search, sorting and filename round-tripping.
-  Genuine typography (`…`, curly quotes, en/em dashes, accented letters) is
-  explicitly left alone — rewriting those is the pointless trump 2.3.18 rejects.
-- **2.3.20** leading/trailing whitespace, **2.3.18.2** ALL CAPS titles.
-
-**After the rip, in place.** Anything that touches neither filenames nor the
-decoded audio the log's CRCs are computed from:
-
-- **2.2.10.10** FLAC not at maximum compression — fixed automatically with
-  `salmon compress`. Safe: recompression changes no filename and no sample.
-- **2.3.16.4** missing required tags (Artist, Album, Title, TrackNumber)
-- **2.2.10.8** ID3 headers on FLAC files
-- **2.3.19** embedded artwork and padding over 1024 KiB
-
-**Structural, reported as blockers.** These mean the release is wrong, not
-merely trumpable:
-
-- **2.1.19.3** files from an enhanced CD's data track riding along — the MP3s
-  and video on a mixed-mode disc must not be in the torrent
-- **2.1.19** track count not matching the disc, **2.1.5.1** unsplit rips
-- **2.3.1** no audio in the folder, **2.3.3** unnecessary nested folders
-- **2.3.12** paths over 180 characters, **2.3.13** filenames without track
-  numbers
-
-
-## Metadata enrichment, and why it runs where it does
-
-whipper tags from MusicBrainz, which is authoritative for titles and track
-order but frequently carries **no label, no catalogue number and no genre** —
-for small-label releases it often records the label as the literal string
-`[no label]`. Those three matter downstream: a tracker wants edition
-information for a CD-sourced rip (RED 2.1.22), and salmon builds its upload
-payload by *reading the files*, looking for
-`label`/`recordlabel`/`organization`/`publisher` and
-`catalognumber`/`labelno`/`catno`. Silent files mean an upload with no edition
-information and no tags.
-
-So `cdrip rip` runs enrichment **after the rip and before the hand-off**:
-
-* not earlier — whipper writes tags during the rip, so anything set beforehand
-  is overwritten;
-* not later — salmon needs the fields to exist to build its payload.
-
-It never renames anything, so the `.cue` and `.log` stay valid.
-
-Sources, in order:
-
-1. **MusicBrainz** — genres from the release group and artist; label and
-   catalogue number when present. No credentials needed. `[no label]` is
-   recognised as the placeholder it is and ignored.
-2. **Discogs** — often has label and catalogue number where MusicBrainz does
-   not, plus genres and styles (styles are preferred: Discogs files metal under
-   the genre "Rock" and the style "Deathcore"). Looking a release up *by id*
-   needs no authentication; *searching* does — so an id has to come from a
-   MusicBrainz url relation or from `--discogs-release`.
-3. **Explicit** `--label`, `--catalogue`, `--genre` always win.
-
-```sh
-cdrip rip --discogs-release 4062910          # label/catalogue/genres from Discogs
-cdrip rip --label "Tribunal Records" --catalogue TRB092 --genre Deathcore
-cdrip rip --no-enrich                        # skip it
-```
-
-## A note on log formats and tracker log checkers
-
-whipper writes its own log format, headed `Log created by: whipper`, with a
-`SHA-256 hash:` line of its own design. Some tracker log checkers identify a
-log purely by its header — RED's accepts **"Exact Audio Copy"** or **"X
-Lossless Decoder"** and rejects anything else outright as *"Unrecognized log
-file!"*, scoring it `-1` and marking the torrent trumpable for
-"Bad/No Checksum(s)". That is not a comment on the rip: cambia (the same parser
-salmon uses) reads the identical log as `Whipper`, `Integrity.Match`, score
-100.
-
-`whipper-plugin-eaclogger` adds an `eac` logger, exposed here as
-`--logger eac`. Be clear about what it does and does not do:
-
-* it writes EAC's **layout**, which is easier for a human to read;
-* it still headers itself `whipper version X (eac logger Y)` — it does **not**
-  claim to be EAC, which is the honest behaviour and keeps it clear of
-  RED 2.2.10.9.1 (forging log data costs your uploading privileges);
-* its `==== Log checksum ====` line is a SHA-256 that EAC's checker cannot
-  verify. The plugin's own source says so: *"It isn't compatible with EAC's
-  one: checklog fail"*.
-
-So it is a formatting choice, **not** a way to pass an EAC log check. Verify
-against the tracker's own log checker before relying on it.
+**Do not eyeball the spectrogram.** A lowpass that looks obvious at one zoom
+level is invisible at another, and this was got wrong here once. Measure: band
+RMS in 1 kHz slices via `sox … sinc <lo>-<hi> stat`, and require **both** a
+sharp cliff (≥15 dB) **and** a flat noise floor above it. One without the other
+is not evidence. The implementation lives in the smoked-salmon fork so the
+Bandcamp approver can use it too.
 
 ## AccurateRip on a mixed-mode disc: absence is not evidence
 
-On an ordinary audio CD every tool agrees on a disc's AccurateRip identity. On
-a **mixed-mode** disc they do not, and the disagreement is silent — the lookup
-succeeds, returns nothing, and the ripper honestly reports "track not present
-in AccurateRip database".
+On a disc with audio tracks followed by a data track, tools disagree about the
+lead-out, silently. libdiscid — and so whipper — uses the MusicBrainz rule
+(data track start − 11400) because that makes a stable *disc ID*. AccurateRip
+uses the **real** lead-out and counts the data track in its CDDB component.
 
-That happened here. whipper reported all six tracks absent; EAC, same disc,
-same drive, found **every track at confidence 2**. The disc was in AccurateRip
-all along.
+The lookup succeeds, returns nothing, and the ripper honestly reports "not in
+the database". On the disc this was written for, whipper reported all six
+tracks absent while EAC found every one at **confidence 2**. An empty result on
+a mixed-mode disc is not evidence of absence — `cdrip info` says so rather than
+quietly falling back to weaker verification.
 
-The cause is the lead-out. libdiscid (so whipper) applies the MusicBrainz rule
-for a trailing data track — lead-out becomes the data track's start minus
-11400 — because that makes a stable *MusicBrainz* disc ID. AccurateRip uses the
-**real** lead-out of the whole disc, and its CDDB component counts the data
-track. Verified against EAC's own `AccurateRip-Offset-log.txt`:
+## Rule coverage
+
+The supplied rules live verbatim in [`docs/red-rules.md`](docs/red-rules.md),
+and `cdrip rules` diffs them against the source:
 
 ```
-cddb 4f0c1b07 = 7 tracks (data track counted), real lead-out 232479
-id1  000822ea = sum(audio offsets) + real lead-out
-id2  002e671b = sum(offset_i x i) + real lead-out x (n+1)
+in scope           : 69
+referenced in code : 19
+NOT referenced     : 50
+lossy-only         : 11   (this pipeline makes lossless CD rips)
+not mechanical     : 7    (vinyl speed, lineage prose, tracker-side state)
 ```
 
-`cdrip` computes both identities and says so. The practical rule: **on a
-mixed-mode disc, treat an empty AccurateRip result as inconclusive** rather
-than falling back to weaker verification — that inference cost three redundant
-rips before it was caught.
+This makes a deliberately weak claim in one direction and a strong one in the
+other: a rule number in a docstring does not prove the check is any good, but a
+rule appearing nowhere is definitely not implemented. It does not grade *how
+well* a rule is covered — a number there would be trusted more than it
+deserves.
 
-## Driving EAC (Win32)
+## Known gaps
 
-Three approaches were measured on EAC 1.8:
+Listed because a tool that hides its gaps is worse than one that has them.
 
-| Approach | Result |
-|---|---|
-| Command line (`-TESTANDCOPY`, …) | **Does not rip.** Opens the window and idles — flat CPU, no files after 45s |
-| UI Automation | **Sees but cannot act.** 56 descendants, all bare `Pane`, zero InvokePattern, no MenuBar |
-| **Win32 menus** | **Works.** Real `HMENU`s, walkable and triggerable via `WM_COMMAND` |
+- **No cue sheet is generated.** RED 2.2.10.7 — a 100% log rip lacking a cue
+  can be trumped by one with even a noncompliant cue. EAC can make one
+  (`Action / Create CUE Sheet / Multiple WAV Files With Corrected Gaps`) after
+  gap detection, but that is not yet wired in.
+- **Gap detection accuracy is not enforced**, which matters once cue sheets are.
+- **HTOA** (hidden track one audio, 2.2.10.6) is not handled.
+- **`preflight` informs but does not feed the upload.** Release type, tags and
+  edition info are still entered by hand — the omission that produced an
+  upload with "unknown" release type and tags.
+- **The 2.3.x tag and filename checks are thin**: required tags (2.3.16.1),
+  combined tags (2.3.18.3), sort order (2.3.14).
+- **OPS is unverified.** Same Gazelle shape, but the base URL and release-type
+  numbering have not been confirmed.
+- **The FLAC command line is 447 of EAC's 500-character limit.** One more
+  `-T "FIELD=%value%"` tag truncates it silently.
 
-`cdrip.eacdrive` walks EAC's menus and finds commands by path — 95 discovered
-on 1.8. The rip entry is `Action / Test & Copy Selected Tracks / Compressed…`
-(id **771** on this build; treat as an observation, not a constant — the module
-looks it up rather than hard-coding it).
+## Related projects
 
-The honest limit: that entry ends in "…" because it opens a dialog, so posting
-the command starts the flow but does not finish it. This is assistance, not
-unattended automation, and the module says so.
-
-One trap worth knowing: match the leaf label **exactly**. `"Uncompressed…"`
-contains `"compressed"`, so a substring match silently selects WAV output
-(id 478) instead of FLAC. That bug was caught against the live app.
-
-## Overlap with smoked-salmon
-
-Already in salmon, and called from here rather than rebuilt:
-
-| Stage | salmon |
-|---|---|
-| Rip-log validation | `checks/logs.py` → `check_log_cambia` (cambia, the parser RED uses) |
-| Rip verification | same file — recomputes each track's CRC32 from the audio and compares it to the log |
-| FLAC integrity | `checks/integrity.py` |
-| Upconversion / MQA | `checks/upconverts.py`, `checks/mqa.py` |
-| Spectrals | `salmon specs --no-upload` |
-| MusicBrainz tagging | `sources/musicbrainz.py` |
-| Torrent creation | `uploader/upload.py` → `generate_torrent` |
-| Lossy-master check | `checks/lossy_master.py` → `salmon check lossy` |
-
-Not in salmon, and therefore here: drive offset and cache handling, the rip
-itself, mixed-mode TOC reading, disc-ID submission, and double-rip comparison.
-
-`salmon up` is intentionally **not** used: it has no dry-run and runs straight
-through to the tracker. `cdrip` calls the individual stages so a rip can be
-produced and inspected without uploading anything.
+- **[smoked-salmon](https://github.com/ligh7s/smoked-salmon)** does everything
+  after the disc read — tagging, spectrals, torrent creation, uploading. cdrip
+  does not duplicate it; it handles what salmon cannot, because salmon never
+  touches a disc: mixed-mode TOCs, drive offsets, cache defeat, disc-ID
+  submission, driving EAC. The lossy-master and release-rule checks were
+  contributed to a fork of salmon rather than kept here, so other salmon
+  front-ends get them.
+- **[EACEnhancements](https://github.com/metaisfacil/EACEnhancements)** solves
+  an overlapping problem from the opposite direction: a C# plugin loaded into
+  EAC, extending it from the inside. It covers ground this does not — cue
+  sheets in the workflow, HTOA, extra metadata fields in EAC's own window, and
+  raising the compressor argument limit from 500 to 1000 characters. It also
+  validates EAC's configuration read-only, as `eac-configure` does. If you want
+  EAC itself to be better, look there; it is the more direct approach, at the
+  cost of relying on memory hacking. This drives EAC from outside and is
+  concerned with everything either side of the rip.
 
 ## Configuration
 
-`~/.config/cdrip/config.toml`:
+`config.toml`, found next to the project or passed with `--config`:
 
 ```toml
-device = "/dev/cdrom"
-staging_dir = "/srv/rips/staging"
-library_dir = "/srv/music/library"
-double_rip_when_unverifiable = true
+device = "D:"                # drive letter on Windows, /dev/cdrom elsewhere
 
 [salmon]
-mode = "local"                        # or "kubectl", if salmon runs in a pod
-# Only used when mode = "kubectl":
+mode = "local"               # or "kubectl"
 # namespace = "media"
 # deployment = "deploy/smoked-salmon"
 # Translate a path on this machine into the path salmon sees. Identical when
-# salmon runs locally; different when it runs in a container with the library
-# mounted somewhere else.
-host_root = "/srv/music/library"
-container_root = "/srv/music/library"
-tracker = "RED"
+# salmon runs locally; different when it runs in a container.
+# path_map = { "/data/music" = "/library" }
 
 [musicbrainz]
 # No web-service endpoint exists for attaching a disc ID, so submission drives
-# the HTML form with a logged-in session cookie. Same shape as the RED/OPS
-# session cookies. Leave empty to be handed the URL to click instead.
+# the HTML form with a logged-in session cookie. Leave empty to be handed the
+# URL to click instead.
 session_cookie = ""
-vault_path = "secret/cdrip/musicbrainz"
 ```
 
-`host_root`/`container_root` translate a path on the ripping machine into the
-path salmon sees inside its container. Set them equal when salmon runs locally.
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest                        # 157 tests, no network, no disc, no EAC
+```
+
+Tests do not touch the drive, the network or a running EAC. Where a check
+depends on Win32, the pure logic is tested and the platform call is not — and
+tests that accidentally reached the live system have been fixed, because a test
+whose result depends on whether EAC happens to be open is not a test.

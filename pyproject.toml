@@ -4,11 +4,23 @@ version = "0.1.0"
 description = "Rip an audio CD to verified FLAC and hand it to smoked-salmon"
 requires-python = ">=3.11"
 dependencies = []
+readme = "README.md"
+keywords = ["cd", "ripping", "flac", "eac", "accuraterip", "musicbrainz"]
+classifiers = [
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: CD Audio :: CD Ripping",
+]
+
+[project.urls]
+Homepage = "https://github.com/mikebones/cdrip"
+Issues = "https://github.com/mikebones/cdrip/issues"
 
 [project.optional-dependencies]
 # libdiscid makes the disc ID agree byte-for-byte with MusicBrainz. Without it
 # cdrip falls back to its own implementation of the same algorithm.
 discid = ["python-libdiscid>=2.0"]
+dev = ["pytest>=8"]
 
 [project.scripts]
 cdrip = "cdrip.cli:main"

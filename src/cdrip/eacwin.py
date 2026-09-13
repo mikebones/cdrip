@@ -537,6 +537,65 @@ def rip_complete(pid: int | None = None) -> bool:
     return get_text(button).strip() == RIP_DONE_LABEL
 
 
+# Cue sheet creation. A rip without one is trumpable under RED 2.2.10.7 - "a
+# 100%% log rip lacking a cue sheet can be replaced by another 100%% log rip
+# with a noncompliant cue sheet" - so the cue is not optional polish.
+#
+# EAC offers several variants and labels one of them "(Noncompliant)" itself.
+# For a track-based rip the wanted one is "Multiple WAV Files With Corrected
+# Gaps"; it needs gap detection to have run first, which is a separate pass
+# over the disc and takes a few minutes.
+MENU_DETECT_GAPS = 539
+MENU_CUE_CORRECTED_GAPS = 572
+MENU_CUE_LEFTOUT_GAPS = 536
+MENU_CUE_NONCOMPLIANT = 586
+MENU_CUE_SINGLE_WAV = 535
+
+CUE_DIALOG = "Create CUE Sheet"
+
+
+def detect_gaps(main_hwnd: int, pid: int | None = None,
+                timeout: float = 1800.0, poll: float = 10.0) -> bool:
+    """Run EAC's gap detection, which a compliant cue sheet depends on.
+
+    This reads the disc again, so it is not instant. Progress is reported
+    through the same extraction dialog a rip uses.
+    """
+    from . import eacdrive
+
+    eacdrive.post_command(main_hwnd, MENU_DETECT_GAPS)
+    time.sleep(5.0)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not rip_in_progress(pid):
+            return True
+        time.sleep(poll)
+    raise TimeoutError("gap detection did not finish within %.0fs" % timeout)
+
+
+def create_cue(main_hwnd: int, path: str, pid: int | None = None,
+               variant: int = MENU_CUE_CORRECTED_GAPS) -> str:
+    """Write a cue sheet, answering the save dialog with ``path``."""
+    from . import eacdrive
+
+    eacdrive.post_command(main_hwnd, variant)
+    dialog = None
+    deadline = time.time() + 20.0
+    while time.time() < deadline and dialog is None:
+        dialog = find_dialog_containing(CUE_DIALOG, pid) or \
+            find_dialog_containing("Save", pid)
+        time.sleep(0.4)
+    if dialog is None:
+        raise TimeoutError("no save dialog appeared for the cue sheet")
+
+    name = control(dialog, 1001)
+    if name is None:
+        raise RuntimeError("save dialog has no filename field")
+    set_text(name, path)
+    click(dialog, BUTTON_OK, settle=3.0)
+    return path
+
+
 def dismiss_rip_dialog(pid: int | None = None) -> bool:
     """Press OK on a finished rip so EAC writes its log and returns to idle."""
     dialog = find_dialog_containing(RIP_DIALOG, pid)
