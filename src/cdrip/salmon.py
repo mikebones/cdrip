@@ -55,7 +55,31 @@ class SalmonTarget:
     host_root: str = ""
     container_root: str = ""
 
+    @property
+    def library_is_reachable(self) -> bool:
+        """Whether the library can be written from the ripping machine.
+
+        False when host_root is unset, which is the real case on a Windows
+        ripping host: the library lives on the cluster's NFS server and the
+        share exports the parent but enumerates the library itself as empty,
+        so there is no local path to copy into. The bytes have to go through
+        the pod instead - see publish().
+        """
+        return bool(self.host_root)
+
     def container_path(self, host_path: str) -> str:
+        # Already a path inside the container - what publish() returns. Pass it
+        # through rather than demanding a host path that may not exist here.
+        croot = _norm(self.container_root) if self.container_root else ""
+        cand = _norm(host_path)
+        if croot and (cand == croot or cand.startswith(croot.rstrip("/") + "/")):
+            return cand
+        if not self.host_root:
+            raise SalmonError(
+                "host_root is unset, so %s cannot be mapped into the "
+                "container. Publish the release with publish() first and use "
+                "the container path it returns." % host_path
+            )
         real = _norm(host_path)
         root = _norm(self.host_root)
         # Compare on a path boundary: a bare startswith would also accept
@@ -239,3 +263,122 @@ def make_torrent(target: SalmonTarget, host_path: str, tracker: str = "RED") -> 
     if proc.returncode != 0:
         raise SalmonError("torrent generation failed:\n%s" % output[-3000:])
     return output
+
+
+def publish(target: SalmonTarget, host_path: str, timeout: int = 3600) -> str:
+    """Put a finished release into salmon's library and return its path there.
+
+    ``adopt`` previously assumed the library was an ordinary directory on the
+    ripping machine and used shutil.copytree. That holds when the ripper is
+    also the NFS server, and fails completely on a Windows ripping host: the
+    server exports the parent, but the library directory itself enumerates as
+    empty from Windows and the UNC path to the library does not resolve
+    at all. There is no local path to copy into, so the bytes go in through
+    the pod as a tar stream.
+
+    Not ``kubectl cp``: under MSYS the pod-side path is rewritten to a Windows
+    path and kubectl rejects the result outright ("one of src or dest must be
+    a local file specification").
+
+    The copy is verified by re-reading the directory out of the container and
+    comparing names and sizes. tar's exit status is not taken as evidence -
+    the same reason seeding is confirmed against the client rather than
+    against salmon's exit code.
+    """
+    if target.mode == "local":
+        raise SalmonError("publish() is for a containerised salmon; "
+                          "mode is 'local', so copy the directory normally.")
+    name = os.path.basename(os.path.normpath(host_path))
+    parent = os.path.dirname(os.path.normpath(host_path)) or "."
+    dest = posixpath.join(target.container_root, name)
+
+    local = {
+        n: os.path.getsize(os.path.join(host_path, n))
+        for n in os.listdir(host_path)
+        if os.path.isfile(os.path.join(host_path, n))
+    }
+    if not local:
+        raise SalmonError("%s has no files to publish" % host_path)
+
+    _run_tar_into_pod(target, parent, name, timeout=timeout)
+
+    # tar carries the ripping host's uid and 0644 across. Transmission seeds
+    # these files as a different uid, and unreadable library files have caused
+    # a real failed-import incident here before, so this is made explicit
+    # rather than left to the nightly permissions job.
+    subprocess.run(
+        ["kubectl", "-n", target.namespace, "exec", target.deployment,
+         "--", "chmod", "-R", "a+rX", dest],
+        capture_output=True, text=True, timeout=300,
+    )
+
+    remote = _remote_listing(target, dest, timeout=300)
+    mismatch = [
+        "%s: %s here, %s there" % (n, local[n], remote.get(n, "absent"))
+        for n in sorted(local) if remote.get(n) != local[n]
+    ]
+    if mismatch:
+        raise SalmonError(
+            "published copy does not match the source:\n  %s"
+            % "\n  ".join(mismatch))
+    return dest
+
+
+def _run_tar_into_pod(target: SalmonTarget, parent: str, name: str,
+                      timeout: int = 3600) -> None:
+    """Stream one directory into the container's library as a tar.
+
+    Separated from publish() so the verification logic is testable without a
+    cluster: the part worth testing is what happens when the copy does NOT
+    match, and that must not require a real transfer to reach.
+    """
+    tar = subprocess.Popen(
+        ["tar", "-cf", "-", "-C", parent, name], stdout=subprocess.PIPE)
+    extract = subprocess.run(
+        ["kubectl", "-n", target.namespace, "exec", "-i", target.deployment,
+         "--", "tar", "-xf", "-", "-C", target.container_root],
+        stdin=tar.stdout, capture_output=True, text=True, timeout=timeout,
+    )
+    if tar.stdout:
+        tar.stdout.close()
+    tar.wait()
+    if tar.returncode != 0:
+        raise SalmonError("tar failed reading %s/%s" % (parent, name))
+    if extract.returncode != 0:
+        raise SalmonError("extract into the pod failed:\n%s"
+                          % (extract.stderr or "")[-2000:])
+
+
+
+_LISTING_SNIPPET = """
+import json, os, sys
+d = sys.argv[1]
+print(json.dumps({n: os.path.getsize(os.path.join(d, n))
+                  for n in os.listdir(d)
+                  if os.path.isfile(os.path.join(d, n))}))
+"""
+
+
+def _remote_listing(target: SalmonTarget, container_dir: str,
+                    timeout: int = 300) -> dict[str, int]:
+    """Name -> size for every file in a directory inside the container.
+
+    Done in Python rather than by parsing `ls`: the release name contains
+    spaces and brackets, and a glob in the shell would treat "[CD FLAC]" as a
+    character class - a real mistake made while checking this by hand.
+    """
+    import json
+
+    proc = subprocess.run(
+        ["kubectl", "-n", target.namespace, "exec", target.deployment, "--",
+         "python3", "-c", _LISTING_SNIPPET, container_dir],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if proc.returncode != 0:
+        raise SalmonError("could not list %s in the pod:\n%s"
+                          % (container_dir, (proc.stderr or "")[-1000:]))
+    for line in reversed((proc.stdout or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    raise SalmonError("no listing returned for %s" % container_dir)

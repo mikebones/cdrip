@@ -12,6 +12,7 @@ import pytest
 
 from cdrip import drive, musicbrainz, toc as toc_mod
 from cdrip.cli import _release_name
+from cdrip import salmon as salmon_mod
 from cdrip.salmon import SalmonTarget, SalmonError
 
 # LBA and length in frames for the six audio tracks, then the data track start.
@@ -912,3 +913,100 @@ def test_riplog_check_reports_undetected_gaps(tmp_path):
     gap = [f for f in findings if "gap handling" in f[2].lower()]
     assert gap, "cdrip check must surface this, not just adopt"
     assert gap[0][1] == "trumpable"
+
+
+# --- publishing into a containerised salmon ---------------------------------
+#
+# adopt used to assume the library was a directory on the ripping machine.
+# That is false on a Windows ripping host: the NFS server exports the parent
+# but the library enumerates as empty, so there is no local path to copy into.
+
+
+def test_library_is_unreachable_without_a_host_root():
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    assert t.library_is_reachable is False
+
+
+def test_library_is_reachable_when_a_host_root_is_configured():
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     host_root="/data/complete/music/complete",
+                     container_root="/downloads/complete")
+    assert t.library_is_reachable is True
+
+
+def test_container_path_passes_through_a_path_already_in_the_container():
+    """What publish() returns must survive being fed back in."""
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    assert (t.container_path("/downloads/complete/Band - Album (2008) [CD FLAC]")
+            == "/downloads/complete/Band - Album (2008) [CD FLAC]")
+
+
+def test_container_path_explains_itself_when_no_mapping_exists():
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    with pytest.raises(SalmonError) as exc:
+        t.container_path("C:/Users/x/rips/Band - Album")
+    assert "host_root is unset" in str(exc.value)
+
+
+def _fake_release(tmp_path):
+    d = tmp_path / "Band - Album (2008) [CD FLAC]"
+    d.mkdir()
+    (d / "01 - One.flac").write_bytes(b"a" * 10)
+    (d / "Band - Album.log").write_bytes(b"b" * 5)
+    return d
+
+
+def test_publish_refuses_a_local_target(tmp_path):
+    t = SalmonTarget(mode="local")
+    with pytest.raises(SalmonError):
+        salmon_mod.publish(t, str(_fake_release(tmp_path)))
+
+
+def test_publish_returns_the_container_path_when_the_copy_matches(tmp_path, monkeypatch):
+    d = _fake_release(tmp_path)
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    monkeypatch.setattr(salmon_mod, "_run_tar_into_pod", lambda *a, **k: None)
+    monkeypatch.setattr(salmon_mod, "_remote_listing",
+                        lambda *a, **k: {"01 - One.flac": 10, "Band - Album.log": 5})
+    assert (salmon_mod.publish(t, str(d))
+            == "/downloads/complete/Band - Album (2008) [CD FLAC]")
+
+
+def test_publish_fails_loudly_when_the_copy_does_not_match(tmp_path, monkeypatch):
+    """A truncated file is the failure worth catching - tar can exit 0 and
+    still land a short file if the stream is cut, and a short FLAC uploads
+    perfectly happily."""
+    d = _fake_release(tmp_path)
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    monkeypatch.setattr(salmon_mod, "_run_tar_into_pod", lambda *a, **k: None)
+    monkeypatch.setattr(salmon_mod, "_remote_listing",
+                        lambda *a, **k: {"01 - One.flac": 3, "Band - Album.log": 5})
+    with pytest.raises(SalmonError) as exc:
+        salmon_mod.publish(t, str(d))
+    assert "01 - One.flac" in str(exc.value)
+
+
+def test_publish_notices_a_file_that_never_arrived(tmp_path, monkeypatch):
+    d = _fake_release(tmp_path)
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    monkeypatch.setattr(salmon_mod, "_run_tar_into_pod", lambda *a, **k: None)
+    monkeypatch.setattr(salmon_mod, "_remote_listing",
+                        lambda *a, **k: {"01 - One.flac": 10})
+    with pytest.raises(SalmonError) as exc:
+        salmon_mod.publish(t, str(d))
+    assert "absent" in str(exc.value)
+
+
+def test_publish_refuses_an_empty_folder(tmp_path):
+    d = tmp_path / "empty"
+    d.mkdir()
+    t = SalmonTarget(mode="kubectl", namespace="ns",
+                     container_root="/downloads/complete")
+    with pytest.raises(SalmonError):
+        salmon_mod.publish(t, str(d))

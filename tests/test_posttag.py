@@ -91,3 +91,46 @@ def test_a_complete_release_reports_nothing(monkeypatch, release):
 
 def test_missing_reports_an_empty_folder(tmp_path):
     assert posttag.missing(str(tmp_path))
+
+
+def test_albumartist_absence_is_reported(monkeypatch, release):
+    """The one tag filled in by hand on the Insidious Awakening rip.
+
+    Not an upload blocker - salmon builds the group's artists from each
+    track's ARTIST - but the library copy is grouped by album artist, so a
+    rip that omits it splits the album in a Plex/Lidarr view.
+    """
+    _stub(monkeypatch, {f: ["x"] for f in
+                        posttag.REQUIRED + ("GENRE", "LABEL", "CATALOGNUMBER")})
+    problems = posttag.missing(release)
+    assert any("ALBUMARTIST is missing" in p for p in problems)
+
+
+def test_a_tag_missing_from_only_some_files_is_caught(monkeypatch, release):
+    """The failure the previous version could not see.
+
+    `missing` used to read files[0] only, so a tag written to track 1 and
+    absent from track 5 passed - which is exactly the shape a spot check
+    misses, and EAC writes tags per track.
+    """
+    complete = {f: ["x"] for f in posttag.REQUIRED + posttag.WANTED_FOR_UPLOAD}
+
+    def partial(path):
+        tags = dict(complete)
+        if path.endswith("05 - Track.flac"):
+            del tags["GENRE"]
+        return tags
+
+    monkeypatch.setattr(posttag, "read_tags", partial)
+    problems = posttag.missing(release)
+    assert any("GENRE is missing" in p for p in problems)
+    # and it says WHERE, so the fix does not have to be a hunt
+    assert any("1 of 6 files" in p and "05 - Track.flac" in p for p in problems)
+
+
+def test_a_tag_missing_everywhere_does_not_list_files(monkeypatch, release):
+    """A wholly absent tag is the common case; naming all six adds nothing."""
+    _stub(monkeypatch, {f: ["x"] for f in posttag.REQUIRED})
+    problems = posttag.missing(release)
+    genre = [p for p in problems if p.startswith("GENRE")][0]
+    assert "of 6 files" not in genre

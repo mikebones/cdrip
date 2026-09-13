@@ -344,8 +344,28 @@ def _handoff(cfg, directory: str, log_path: str | None, args) -> int:
         container_root=cfg.salmon.container_root,
     )
 
+    # The formatting rules are checked on the LOCAL copy, before anything is
+    # published. They read the filesystem directly, so they cannot run against
+    # a path that only exists inside the container - and checking first means a
+    # release that is going to be rejected never gets copied anywhere.
+    _section("Formatting rules")
+    rule_findings = compliance_mod.check_release(directory)
+    for f in rule_findings:
+        _echo("  %s" % f)
+    _echo("  %s" % compliance_mod.summarise(rule_findings))
+
     final = directory
-    if not os.path.realpath(directory).startswith(os.path.realpath(cfg.library_dir)):
+    if not target.library_is_reachable:
+        # No local path corresponds to the library - the normal case when the
+        # ripping machine is not the file server. The bytes go in through the
+        # pod, and every step after this works on the container path.
+        _section("Publishing to salmon's library (through the pod)")
+        _echo("  %s" % directory)
+        final = salmon_mod.publish(target, directory)
+        _echo("  -> %s (verified by name and size)" % final)
+        if log_path:
+            log_path = final.rstrip("/") + "/" + os.path.basename(log_path)
+    elif not os.path.realpath(directory).startswith(os.path.realpath(cfg.library_dir)):
         final = os.path.join(cfg.library_dir, _release_name(directory))
         _section("Publishing to salmon's library")
         _echo("  %s -> %s" % (directory, final))
@@ -354,11 +374,9 @@ def _handoff(cfg, directory: str, log_path: str | None, args) -> int:
         if log_path:
             log_path = os.path.join(final, os.path.basename(log_path))
 
-    _section("Formatting rules")
-    rule_findings = compliance_mod.check_release(final)
-    for f in rule_findings:
-        _echo("  %s" % f)
-    _echo("  %s" % compliance_mod.summarise(rule_findings))
+    # Recompression runs on the published copy, which is the one that gets
+    # uploaded. It rewrites the FLAC container, not the decoded audio, so the
+    # log's per-track CRCs still match afterwards.
     fixable = [f for f in rule_findings if f.fixable_in_place]
     if any(f.rule == "2.2.10.10" for f in fixable):
         _section("Recompressing to level 8")

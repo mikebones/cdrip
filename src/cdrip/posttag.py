@@ -123,24 +123,55 @@ REQUIRED = ("ARTIST", "TITLE", "ALBUM", "TRACKNUMBER", "DATE")
 # Not required by the audio, but an upload without them lands with no edition
 # information and no tags - which is what produced a torrent showing "unknown"
 # release type and "unknown" tags.
-WANTED_FOR_UPLOAD = ("GENRE", "LABEL", "CATALOGNUMBER")
+WANTED_FOR_UPLOAD = ("GENRE", "LABEL", "CATALOGNUMBER", "ALBUMARTIST")
+
+# ALBUMARTIST is in that list for honest but narrower reasons than the other
+# three. salmon does NOT need it: construct_artists_li builds the group's
+# artists from each track's ARTIST tag, so a release with no ALBUMARTIST
+# uploads correctly - checked in salmon's own pre_data.py, not assumed. It
+# earns its place because the library copy is what Plex and Lidarr group by,
+# because one rip carrying it and the next not is the kind of inconsistency
+# nobody notices until a library view splits an album in two, and because it
+# was filled in by hand on a real rip - which is this module's whole premise.
 
 
 def missing(directory: str) -> list[str]:
-    """Report tags an upload needs that are absent."""
+    """Report tags an upload needs that are absent.
+
+    Every file is read, not just the first. A tag written to track 1 and
+    missing from track 5 is the shape that survives a spot check, and EAC
+    fills tags per track, so partial coverage is a real state rather than a
+    hypothetical one.
+    """
     files = audio_files(directory)
     if not files:
         return ["no FLAC files in %s" % directory]
-    tags = read_tags(files[0])
+
+    absent: dict[str, list[str]] = {}
+    for path in files:
+        tags = read_tags(path)
+        for field in REQUIRED + WANTED_FOR_UPLOAD:
+            if not tags.get(field):
+                absent.setdefault(field, []).append(os.path.basename(path))
+
+    def where(field: str) -> str:
+        names = absent[field]
+        if len(names) == len(files):
+            return ""
+        return " (on %d of %d files: %s)" % (
+            len(names), len(files),
+            ", ".join(names[:3]) + (", ..." if len(names) > 3 else ""))
+
     out = []
     for field in REQUIRED:
-        if not tags.get(field):
-            out.append("%s is missing - required on every music upload "
-                       "(2.3.16.1)" % field)
+        if field in absent:
+            out.append("%s is missing%s - required on every music upload "
+                       "(2.3.16.1)" % (field, where(field)))
     for field in WANTED_FOR_UPLOAD:
-        if not tags.get(field):
-            out.append("%s is missing - without it the upload carries no %s, "
+        if field in absent:
+            out.append("%s is missing%s - without it the upload carries no %s, "
                        "which is how a release lands with 'unknown' tags and "
                        "no edition information (2.1.22)"
-                       % (field, "genre" if field == "GENRE" else field.lower()))
+                       % (field, where(field),
+                          "genre" if field == "GENRE" else field.lower()))
     return out
