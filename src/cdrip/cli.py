@@ -43,6 +43,7 @@ from . import tracker as tracker_mod
 from . import enrich as enrich_mod
 from . import musicbrainz as mb
 from . import rip as rip_mod
+from . import rules as rules_mod
 from . import riplog as riplog_mod
 from . import salmon as salmon_mod
 from . import tagging
@@ -764,6 +765,50 @@ def cmd_eac_rip(args, cfg) -> int:
     return 0
 
 
+def cmd_rules(args, cfg) -> int:
+    """Report which tracker rules are referenced by the code, and which are not.
+
+    This is deliberately a weak claim in one direction and a strong one in the
+    other. A rule number appearing in the source does not prove the check is
+    any good - it might be a passing mention. But a rule that appears nowhere
+    is definitely not implemented, and that is the list worth having.
+
+    It does not try to grade how well a rule is covered. That is a judgement
+    call, and a number here would be trusted more than it deserves.
+    """
+    roots = args.root or [
+        os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "src"),
+    ]
+    roots = [r for r in roots if os.path.isdir(r)]
+    try:
+        cov = rules_mod.coverage(roots, args.doc)
+    except FileNotFoundError as exc:
+        _echo(str(exc))
+        return 1
+
+    _section("Rule coverage")
+    _echo("  source trees searched : %s" % ", ".join(roots))
+    _echo("  in scope              : %d" % cov.in_scope)
+    _echo("  referenced in code    : %d" % len(cov.covered))
+    _echo("  NOT referenced        : %d" % len(cov.gaps))
+    _echo("  lossy-only (skipped)  : %d" % len(cov.lossy_only))
+    _echo("  not mechanical        : %d" % len(cov.not_mechanical))
+
+    if args.gaps or args.all:
+        _section("Not referenced anywhere in the code")
+        for rule in cov.gaps:
+            _echo("  %-12s %s" % (rule.number, rule.text[:150]))
+    if args.all:
+        _section("Referenced")
+        for rule in cov.covered:
+            _echo("  %-12s %s" % (rule.number, rule.text[:100]))
+        _section("Not mechanically checkable")
+        for rule in cov.not_mechanical:
+            _echo("  %-12s %s" % (rule.number, rule.not_mechanical))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cdrip", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -894,6 +939,18 @@ def build_parser() -> argparse.ArgumentParser:
                           help="rip even with wrong settings")
     p_eacrip.add_argument("--timeout", type=float, default=7200.0)
     p_eacrip.set_defaults(func=cmd_eac_rip)
+
+    p_rules = sub.add_parser(
+        "rules",
+        help="which tracker rules the code references, and which it does not")
+    p_rules.add_argument("--doc", help="path to red-rules.md")
+    p_rules.add_argument("--root", action="append",
+                         help="source tree to search (repeatable)")
+    p_rules.add_argument("--gaps", action="store_true",
+                         help="list the rules with no reference in the code")
+    p_rules.add_argument("--all", action="store_true",
+                         help="list every category")
+    p_rules.set_defaults(func=cmd_rules)
 
     p_pre = sub.add_parser(
         "preflight",
