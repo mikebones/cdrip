@@ -691,6 +691,79 @@ def cmd_eac_load(args, cfg) -> int:
     return 0
 
 
+def cmd_eac_rip(args, cfg) -> int:
+    """Start EAC's test-and-copy rip and wait for it to finish.
+
+    Deliberately checks the settings first. Every one of them is baked into
+    the log and the filenames, so finding out afterwards means ripping again -
+    and a rip is half an hour. The check is read-only unless --apply-settings
+    is given.
+    """
+    from . import eacdrive as eacdrive_mod
+    from . import eacwin as eacwin_mod
+
+    main = eacdrive_mod.find_window()
+    if main is None:
+        _echo("EAC is not running.")
+        return 1
+
+    if eacwin_mod.rip_in_progress(args.pid):
+        _echo("EAC is already extracting; refusing to start another rip.")
+        return 1
+
+    if args.offset is not None:
+        settings = eacsettings_mod.spec(read_offset=args.offset,
+                                        output_dir=args.output_dir,
+                                        encoder=args.encoder)
+        result = eacsettings_mod.apply(main, settings, pid=args.pid,
+                                       dry_run=not args.apply_settings)
+        _section("EAC settings (%d checked)" % result.checked)
+        for line in result.changed:
+            _echo("  FIXED   %s" % line)
+        for line in result.problems:
+            _echo("  WRONG   %s" % line)
+        if result.problems:
+            _echo("")
+            _echo("Refusing to rip. These are recorded in the log and the "
+                  "filenames, so fixing them afterwards means ripping again. "
+                  "Re-run with --apply-settings, or --ignore-settings to "
+                  "proceed anyway.")
+            if not args.ignore_settings:
+                return 1
+        if not result.problems and not result.changed:
+            _echo("  every setting is already correct")
+    else:
+        _echo("No --offset given; skipping the settings check. The read "
+              "offset is drive-specific, so there is no safe default.")
+
+    _section("Ripping")
+    if not eacwin_mod.start_rip(main, args.pid):
+        _echo("  The rip did not start. Posting the menu command succeeds "
+              "whether or not extraction begins, so this means EAC declined - "
+              "check that tracks are selected and a disc is loaded.")
+        return 1
+    _echo("  extraction started; waiting for it to finish")
+    _echo("  (a zero disk-read delta is NOT evidence of a stall here - CD "
+          "reads bypass the process I/O counters)")
+
+    finished = eacwin_mod.wait_for_rip(args.pid, timeout=args.timeout)
+    if not finished:
+        _echo("  the rip never started")
+        return 1
+    _echo("  extraction finished")
+
+    if args.output_dir and os.path.isdir(args.output_dir):
+        _section("Output")
+        for name in sorted(os.listdir(args.output_dir)):
+            full = os.path.join(args.output_dir, name)
+            if os.path.isfile(full):
+                _echo("  %10d  %s" % (os.path.getsize(full), name))
+        _echo("")
+        _echo("Next: cdrip adopt %s --tracks N --expect-offset %s"
+              % (args.output_dir, args.offset if args.offset is not None else "?"))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cdrip", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -806,6 +879,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_load.add_argument("--ignore-naming", action="store_true",
                         help="load even when the titles have naming findings")
     p_load.set_defaults(func=cmd_eac_load)
+
+    p_eacrip = sub.add_parser(
+        "eac-rip",
+        help="check settings, start EAC's test-and-copy rip, and wait")
+    p_eacrip.add_argument("--offset", type=int,
+                          help="this drive's AccurateRip read offset")
+    p_eacrip.add_argument("--output-dir")
+    p_eacrip.add_argument("--encoder")
+    p_eacrip.add_argument("--pid", type=int)
+    p_eacrip.add_argument("--apply-settings", action="store_true",
+                          help="fix wrong settings instead of refusing")
+    p_eacrip.add_argument("--ignore-settings", action="store_true",
+                          help="rip even with wrong settings")
+    p_eacrip.add_argument("--timeout", type=float, default=7200.0)
+    p_eacrip.set_defaults(func=cmd_eac_rip)
 
     p_pre = sub.add_parser(
         "preflight",
