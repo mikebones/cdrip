@@ -6,3 +6,7 @@ build/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# The tracker ruleset is members-only content. cdrip rules --doc reads it
+# from here, but it is deliberately not published.
+docs/red-rules.md
