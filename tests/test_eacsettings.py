@@ -160,3 +160,41 @@ def test_apply_reports_nothing_when_everything_is_already_right(monkeypatch):
     result = eacsettings.verify(0, _spec())
     assert result.ok
     assert result.checked == len(_spec())
+
+
+def test_log_checksum_is_required():
+    """The setting whose absence made a previous upload trumpable.
+
+    EAC does not sign its log unless asked. An unsigned log cannot be
+    verified, so the torrent is marked Bad/No Checksum(s) no matter how
+    good the rip was - and the option is off by default.
+    """
+    settings = {s.key: s for s in _spec()}
+    assert settings["append_log_checksum"].wanted is True
+    assert "Bad/No Checksum" in settings["append_log_checksum"].why
+
+
+def test_log_language_is_forced_to_english():
+    settings = {s.key: s for s in _spec()}
+    assert settings["log_in_english"].wanted is True
+    assert "2.2.10.5" in settings["log_in_english"].why
+
+
+def test_directory_comparison_ignores_a_trailing_separator():
+    """EAC stores a directory with a trailing backslash whether or not one
+    was written, so strict equality 'fixes' it on every run forever."""
+    s = {x.key: x for x in _spec(output_dir=r"C:\rips")}["output_dir"]
+    assert eacsettings.matches(s, "C:\\rips\\")
+    assert eacsettings.matches(s, "C:\\rips")
+    assert not eacsettings.matches(s, "C:\\other")
+
+
+def test_text_comparison_ignores_surrounding_whitespace():
+    s = {x.key: x for x in _spec()}["naming_scheme"]
+    assert eacsettings.matches(s, "  %tracknr2% - %title%  ")
+
+
+def test_checkbox_comparison_is_still_exact():
+    s = {x.key: x for x in _spec()}["c2_pointers"]
+    assert eacsettings.matches(s, False)
+    assert not eacsettings.matches(s, True)

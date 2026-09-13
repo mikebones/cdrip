@@ -508,21 +508,66 @@ def rip_in_progress(pid: int | None = None) -> bool:
     return find_dialog_containing(RIP_DIALOG, pid) is not None
 
 
+# The extraction dialog's one action button. It reads "Cancel" while the rip
+# runs and becomes "OK" when it is done - the window does NOT close by itself.
+RIP_BUTTON = 811
+RIP_DONE_LABEL = "OK"
+# The dialog also has a status ListBox (id 812) whose last line reads "Audio
+# Extraction Complete", but its text is not readable from another process:
+# unlike WM_GETTEXT, LB_GETTEXT is not marshalled across process boundaries
+# and would need a buffer written into EAC's address space. The button label
+# gives the same answer for free, so the listbox is left alone.
+
+
+def rip_complete(pid: int | None = None) -> bool:
+    """Whether the extraction dialog is showing a *finished* rip.
+
+    Waiting for the window to disappear does not work: when extraction
+    finishes EAC leaves the dialog up with its summary and waits for someone
+    to press OK. A wait built on the window closing therefore hangs forever on
+    a rip that succeeded. The button's label is the actual signal - it reads
+    "Cancel" during the rip and "OK" afterwards.
+    """
+    dialog = find_dialog_containing(RIP_DIALOG, pid)
+    if dialog is None:
+        return False
+    button = control(dialog, RIP_BUTTON)
+    if button is None:
+        return False
+    return get_text(button).strip() == RIP_DONE_LABEL
+
+
+def dismiss_rip_dialog(pid: int | None = None) -> bool:
+    """Press OK on a finished rip so EAC writes its log and returns to idle."""
+    dialog = find_dialog_containing(RIP_DIALOG, pid)
+    if dialog is None:
+        return False
+    click(dialog, RIP_BUTTON, settle=2.5)
+    return True
+
+
 def wait_for_rip(pid: int | None = None, timeout: float = 7200.0,
                  poll: float = 15.0, on_tick=None) -> bool:
-    """Block until EAC's extraction window closes.
+    """Block until EAC's rip finishes.
 
-    Returns True if the rip finished, False if it never started - which is a
-    real case worth distinguishing, because posting the menu command succeeds
-    whether or not a rip actually begins.
+    Returns True if it finished, False if it never started - a real case
+    worth distinguishing, because posting the menu command succeeds whether or
+    not extraction actually begins.
+
+    Completion is detected from the dialog's button, not from the window
+    vanishing; see :func:`rip_complete`.
     """
     deadline = time.time() + timeout
     started = False
     while time.time() < deadline:
+        if rip_complete(pid):
+            return True
         running = rip_in_progress(pid)
         if running:
             started = True
         elif started:
+            # The dialog went away without ever reading "OK" - someone closed
+            # it, or EAC aborted. Finished either way, just not cleanly.
             return True
         if on_tick is not None:
             on_tick(running)

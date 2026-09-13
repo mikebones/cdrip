@@ -110,6 +110,24 @@ def spec(read_offset: int, output_dir: str | None = None,
                 "trimming silence changes the audio, so the rip stops "
                 "matching AccurateRip or anyone else's copy"),
 
+        # --- the log itself -------------------------------------------------
+        # This one is the whole reason a previous upload was marked
+        # "Trumpable For: Bad/No Checksum(s)". EAC does not sign its log
+        # unless asked to, and an unsigned log cannot be verified, so the
+        # rip's quality is irrelevant - it is trumpable on sight. It is off
+        # by default and lives on a tab that is easy to miss.
+        Setting("append_log_checksum", options, 2, 13718, CHECK, True,
+                "without it EAC writes no '==== Log checksum ====' line, the "
+                "log cannot be verified, and the torrent is trumpable for "
+                "Bad/No Checksum(s) however good the rip was"),
+        Setting("log_in_english", options, 1, 4322, CHECK, True,
+                "RED 2.2.10.5 - a log in another language cannot be scored by "
+                "the automated checker and needs a manual staff adjustment"),
+        Setting("auto_write_log", options, 2, 13706, CHECK, True,
+                "writes the log beside the rip automatically, instead of "
+                "leaving it behind a 'Create Log' button that is easy to "
+                "forget and produces a file nobody checked"),
+
         # --- naming, which cannot be fixed after the rip --------------------
         Setting("naming_scheme", options, 4, 4488, TEXT,
                 "%tracknr2% - %title%",
@@ -143,6 +161,22 @@ def spec(read_offset: int, output_dir: str | None = None,
                            "wrong EAC still rips, then fails every track at "
                            "the compression step"))
     return out
+
+
+def matches(setting: Setting, actual: object) -> bool:
+    """Whether a control's value is already what we want.
+
+    Not plain equality, because EAC normalises what it stores: a directory
+    comes back with a trailing separator whether or not one was written. A
+    strict comparison therefore reports a permanent difference and "fixes" it
+    on every single run, which trains people to ignore the output.
+    """
+    if setting.kind == TEXT and isinstance(actual, str):
+        if setting.key.endswith("_dir"):
+            return (actual.rstrip("\\/").lower()
+                    == str(setting.wanted).rstrip("\\/").lower())
+        return actual.strip() == str(setting.wanted).strip()
+    return actual == setting.wanted
 
 
 def _read(page: int, setting: Setting) -> object:
@@ -199,7 +233,7 @@ def apply(main_hwnd: int, settings: list[Setting], pid: int | None = None,
                 page = eacwin.set_page(dialog, setting.page)
                 actual = _read(page, setting)
                 result.checked += 1
-                if actual == setting.wanted:
+                if matches(setting, actual):
                     continue
                 message = setting.describe(actual)
                 if dry_run:
