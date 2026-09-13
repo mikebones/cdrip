@@ -53,6 +53,7 @@ from . import musicbrainz as mb
 from . import rip as rip_mod
 from . import rules as rules_mod
 from . import riplog as riplog_mod
+from . import posttag as posttag_mod
 from . import salmon as salmon_mod
 from . import tagging
 from . import toc as toc_mod
@@ -460,6 +461,20 @@ def cmd_adopt(args, cfg) -> int:
             _echo("  tracker will see too. Fix the rip rather than uploading")
             _echo("  and reporting for manual review; --ignore-log overrides.")
             return 1
+
+    _section("Tags")
+    fixes = posttag_mod.check(path, expect_tracks=args.tracks)
+    for fix in fixes:
+        _echo("  %s" % fix)
+    if fixes and not args.no_fix_tags:
+        written = posttag_mod.apply(path, fixes)
+        _echo("  corrected on %d file(s)" % len(written))
+    elif fixes:
+        _echo("  left as-is (--no-fix-tags)")
+    for problem in posttag_mod.missing(path):
+        _echo("  ! %s" % problem)
+    if not fixes:
+        _echo("  no tag defects found")
 
     _section("Formatting rules")
     findings = compliance_mod.check_release(path, expect_tracks=args.tracks)
@@ -974,6 +989,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_adopt.add_argument("--genre", action="append")
     p_adopt.add_argument("--discogs-release", default=None)
     p_adopt.add_argument("--no-enrich", action="store_true")
+    p_adopt.add_argument("--no-fix-tags", action="store_true",
+                         help="report tag defects without correcting them")
     p_adopt.add_argument("--no-salmon", action="store_true",
                          help="stop before handing off to salmon")
     p_adopt.add_argument("--no-torrent", action="store_true")
