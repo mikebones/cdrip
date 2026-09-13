@@ -38,6 +38,10 @@ def test_wait_returns_false_when_the_rip_never_starts(monkeypatch):
 
 
 def test_wait_returns_true_once_a_started_rip_finishes(monkeypatch):
+    # rip_complete must be stubbed too, or each loop enumerates every window
+    # on the machine - which makes the test slow and, worse, dependent on
+    # whether EAC happens to be running here.
+    monkeypatch.setattr(eacwin, "rip_complete", lambda pid=None: False)
     states = iter([True, True, True, False])
     monkeypatch.setattr(eacwin, "rip_in_progress",
                         lambda pid=None: next(states, False))

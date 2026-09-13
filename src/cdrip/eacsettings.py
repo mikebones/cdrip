@@ -66,13 +66,19 @@ class Result:
         return not self.problems
 
 
-def spec(read_offset: int, output_dir: str | None = None,
+def spec(read_offset: int | None = None, output_dir: str | None = None,
          encoder: str | None = None) -> list[Setting]:
-    """The settings to enforce, given this drive's offset.
+    """The settings to enforce.
 
-    ``read_offset`` is the drive's AccurateRip value. ``output_dir``, when
-    given, pins EAC's extraction directory so a rip does not stop on a folder
-    prompt.
+    ``read_offset`` is the drive's AccurateRip value. It is optional, and that
+    matters: an unknown offset must not disable the *rest* of the checks. Only
+    two settings here depend on the drive, and the other nineteen - including
+    the log checksum, whose absence makes a torrent trumpable on sight - are
+    properties of EAC, not of the drive. An earlier version skipped everything
+    when no offset was given, which quietly turned the whole gate off.
+
+    ``output_dir``, when given, pins EAC's extraction directory so a rip does
+    not stop on a folder prompt.
     """
     drive, options, compression = (
         eacwin.DIALOG_DRIVE, eacwin.DIALOG_EAC, eacwin.DIALOG_COMPRESSION,
@@ -95,9 +101,6 @@ def spec(read_offset: int, output_dir: str | None = None,
         Setting("use_read_offset", drive, 2, 7606, CHECK, True,
                 "without offset correction the rip is shifted against every "
                 "other copy of this disc"),
-        Setting("read_offset", drive, 2, 1527, TEXT, "%+d" % read_offset,
-                "this drive's AccurateRip offset; a wrong value looks clean "
-                "but is bit-shifted against everyone else"),
         Setting("accuraterip", drive, 2, 7613, CHECK, True,
                 "AccurateRip confirmation is the strongest evidence a rip is "
                 "correct, and RED weights it"),
@@ -147,6 +150,12 @@ def spec(read_offset: int, output_dir: str | None = None,
         Setting("check_return_code", compression, 1, 6018, CHECK, True,
                 "without this a failed encode is silently treated as success"),
     ]
+    if read_offset is not None:
+        out.append(Setting("read_offset", drive, 2, 1527, TEXT,
+                           "%+d" % read_offset,
+                           "this drive's AccurateRip offset; a wrong value "
+                           "looks clean but is bit-shifted against everyone "
+                           "else's copy of the disc"))
     if output_dir:
         out.append(Setting("use_fixed_output_dir", options, 8, 12903, CHECK, True,
                            "pins the extraction directory so an unattended rip "

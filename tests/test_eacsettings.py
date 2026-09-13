@@ -198,3 +198,23 @@ def test_checkbox_comparison_is_still_exact():
     s = {x.key: x for x in _spec()}["c2_pointers"]
     assert eacsettings.matches(s, False)
     assert not eacsettings.matches(s, True)
+
+
+def test_spec_without_an_offset_still_checks_everything_else():
+    """An unknown drive offset must not switch the whole gate off.
+
+    Only the offset depends on the drive; the log checksum and the rest are
+    properties of EAC. An earlier version skipped all of them when no offset
+    was supplied, disabling the gate silently.
+    """
+    without = {s.key for s in eacsettings.spec(read_offset=None)}
+    assert "read_offset" not in without
+    assert "append_log_checksum" in without
+    assert "secure_mode" in without
+    # Everything the full spec has, less the one offset-dependent setting.
+    assert len(without) == len(eacsettings.spec(read_offset=6)) - 1
+
+
+def test_offset_setting_appears_only_when_an_offset_is_known():
+    with_offset = {s.key for s in eacsettings.spec(read_offset=6)}
+    assert "read_offset" in with_offset

@@ -712,30 +712,34 @@ def cmd_eac_rip(args, cfg) -> int:
         _echo("EAC is already extracting; refusing to start another rip.")
         return 1
 
-    if args.offset is not None:
-        settings = eacsettings_mod.spec(read_offset=args.offset,
-                                        output_dir=args.output_dir,
-                                        encoder=args.encoder)
-        result = eacsettings_mod.apply(main, settings, pid=args.pid,
-                                       dry_run=not args.apply_settings)
-        _section("EAC settings (%d checked)" % result.checked)
-        for line in result.changed:
-            _echo("  FIXED   %s" % line)
-        for line in result.problems:
-            _echo("  WRONG   %s" % line)
-        if result.problems:
-            _echo("")
-            _echo("Refusing to rip. These are recorded in the log and the "
-                  "filenames, so fixing them afterwards means ripping again. "
-                  "Re-run with --apply-settings, or --ignore-settings to "
-                  "proceed anyway.")
-            if not args.ignore_settings:
-                return 1
-        if not result.problems and not result.changed:
-            _echo("  every setting is already correct")
-    else:
-        _echo("No --offset given; skipping the settings check. The read "
-              "offset is drive-specific, so there is no safe default.")
+    # The settings check always runs. Only the read offset depends on the
+    # drive; everything else - the log checksum above all - is a property of
+    # EAC, and skipping the lot for want of an offset turns the gate off
+    # exactly when nobody notices.
+    settings = eacsettings_mod.spec(read_offset=args.offset,
+                                    output_dir=args.output_dir,
+                                    encoder=args.encoder)
+    result = eacsettings_mod.apply(main, settings, pid=args.pid,
+                                   dry_run=not args.apply_settings)
+    _section("EAC settings (%d checked)" % result.checked)
+    if args.offset is None:
+        _echo("  note: no --offset given, so the read offset is NOT checked. "
+              "It is drive-specific and has no safe default; a wrong one "
+              "looks clean and is bit-shifted against every other copy.")
+    for line in result.changed:
+        _echo("  FIXED   %s" % line)
+    for line in result.problems:
+        _echo("  WRONG   %s" % line)
+    if result.problems:
+        _echo("")
+        _echo("Refusing to rip. These are recorded in the log and the "
+              "filenames, so fixing them afterwards means ripping again. "
+              "Re-run with --apply-settings, or --ignore-settings to "
+              "proceed anyway.")
+        if not args.ignore_settings:
+            return 1
+    if not result.problems and not result.changed:
+        _echo("  every setting is already correct")
 
     _section("Ripping")
     if not eacwin_mod.start_rip(main, args.pid):
